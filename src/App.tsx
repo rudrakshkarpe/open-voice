@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, Languages, Pause, Play, RotateCcw, Upload, Video, Headphones } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDown, Languages, Pause, Play, RotateCcw, Upload, Video, Headphones, Volume2 } from 'lucide-react'
 import { useMediaSession } from './hooks/useMediaSession'
 import { useDubPlayer } from './hooks/useDubPlayer'
 import { targetLanguages } from './lib/languages'
+import { captionAt, captionCues } from './lib/captions'
 
 const clock = (time: number) => `${Math.floor(time / 60)}:${Math.floor(time % 60).toString().padStart(2, '0')}`
 
@@ -22,7 +23,10 @@ export default function App() {
   const loadRevision = useRef(0)
   const segment = session.job?.segments.find((item) => player.time >= item.start && player.time < item.end)
   const dub = segment && session.job?.dubs[`${segment.index}-${targetCode}`]
-  const caption = targetCode === 'original' ? segment?.text : dub?.state === 'ready' ? dub.text : ''
+  const captionText = targetCode === 'original' ? segment?.text : dub?.state === 'ready' ? dub.text : ''
+  const cues = useMemo(() => captionCues(captionText ?? '', segment?.start ?? 0, segment?.end ?? 0), [captionText, segment?.start, segment?.end])
+  const caption = captionAt(cues, player.time)
+  const targetName = targetLanguages.find((language) => language.code === targetCode)?.name
   const completed = session.job?.segments.filter((item) => item.state === 'ready').length ?? 0
   const total = session.job?.segments.length ?? 0
   const error = fileError || player.error || session.error || session.job?.error
@@ -86,8 +90,10 @@ export default function App() {
         <aside>
           <div className="aside-head"><p>LANGUAGE</p><span>{preparing ? `${completed}/${total || '…'} sections` : session.job?.status === 'ready' ? 'Captions prepared' : ''}</span></div>
           <section className="detected"><small>SOURCE LANGUAGE</small><div><span>{session.job?.language ?? (preparing ? 'Identifying speech…' : 'Not yet identified')}</span></div><p>{session.job?.language ? 'Estimated from the transcribed speech.' : 'Waiting for enough clear speech to identify the language.'}</p></section>
-          <label className="language-select"><small>AUDIO & CAPTIONS</small><div><Languages size={18} /><select value={targetCode} onChange={(event) => { previewRef.current?.pause(); setTargetCode(event.target.value) }}><option value="original">Original</option>{targetLanguages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></div></label>
-          <section className="output-card"><small>{targetCode === 'original' ? 'SOURCE CAPTION' : 'TRANSLATED CAPTION'}</small><p>{caption || (dub?.text ? dub.text : preparing ? 'Extracting and transcribing your audio…' : 'Press play to see captions for this section.')}</p><div className={player.playing ? 'active' : ''}><i /><span>{player.playing ? player.state : 'Paused'}</span></div></section>
+          <label className="language-select"><small>TRANSLATE TO</small><div><Languages size={18} /><select aria-describedby="translation-help" value={targetCode} onChange={(event) => { previewRef.current?.pause(); setTargetCode(event.target.value) }}><option value="original">Original · no translation</option>{targetLanguages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></div></label>
+          <p className="translation-help" id="translation-help">Choose a language to change both the voice and captions. Switch languages at any point.</p>
+          {targetName && <button className="translate-button" onClick={() => { previewRef.current?.pause(); player.play() }} disabled={player.playing}><Volume2 size={16} /><span>{player.playing ? `${targetName} audio selected` : `Translate & play in ${targetName}`}</span></button>}
+          <section className="output-card"><small>{targetCode === 'original' ? 'SOURCE CAPTION' : 'TRANSLATED CAPTION'}</small><p>{caption || (!player.playing ? 'Press play. Captions appear as the video progresses.' : preparing && !segment?.text ? 'Preparing captions for this section…' : targetName && dub?.state !== 'ready' ? player.state : 'Listening…')}</p><div className={player.playing ? 'active' : ''}><i /><span>{player.playing ? player.state : 'Paused'}</span></div></section>
           {session.job?.extractedAudioUrl && <details className="audio-check"><summary>Check extracted audio</summary><p>Listen to the exact track used for transcription.</p><audio ref={previewRef} src={session.job.extractedAudioUrl} controls onPlay={player.pause} /><small>24 kHz mono · {session.job.rmsDb?.toFixed(1)} dBFS RMS</small></details>}
           {session.job?.segments.length ? <details className="transcript-check"><summary>Source transcript ({completed}/{total})</summary><div>{session.job.segments.map((item) => <button key={item.index} onClick={() => player.seek(item.start)}><small>{clock(item.start)}</small><span>{item.text || item.error || (item.state === 'ready' ? 'No speech' : 'Transcribing…')}</span></button>)}</div></details> : null}
         </aside>

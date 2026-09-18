@@ -29,10 +29,11 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
     if (video.current) video.current.currentTime = next
     setTime(next)
   }, [audio, video])
+  const play = useCallback(() => { setError(''); desired.current = true; setPlaying(true) }, [])
   const toggle = useCallback(() => {
     if (desired.current) pause()
-    else { setError(''); desired.current = true; setPlaying(true) }
-  }, [pause])
+    else play()
+  }, [pause, play])
 
   useEffect(() => {
     // Invalidate old speech immediately when a different language is selected.
@@ -106,5 +107,5 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
     return () => { clearInterval(interval); lastVideo?.pause(); lastAudio?.pause() }
   }, [audio, video, pause])
 
-  return { videoRef: video, audioRef: audio, playing, time, state, error, toggle, pause, reset, seek }
+  return { videoRef: video, audioRef: audio, playing, time, state, error, play, toggle, pause, reset, seek }
 }

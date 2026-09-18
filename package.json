@@ -7,7 +7,7 @@
     "dev": "concurrently -k -n web,gateway -c magenta,cyan \"vite\" \"tsx watch server/index.ts\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "tsx --test server/*.test.ts",
+    "test": "tsx --test server/*.test.ts src/lib/*.test.ts",
     "preview": "vite preview",
     "start": "node dist-server/index.js"
   },

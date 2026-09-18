@@ -77,6 +77,11 @@ aside { min-height: 520px; padding: 23px; }
 .language-select > div { height: 48px; display: grid; grid-template-columns: 28px 1fr 18px; align-items: center; gap: 5px; padding: 0 10px; border: 1px solid #333337; border-radius: 10px; color: #a8ff78; background: #151518; }
 .language-select select { width: 100%; appearance: none; border: 0; outline: 0; color: #f3f3f0; background: transparent; font: 500 13px 'Space Grotesk'; cursor: pointer; }
 .language-select option { color: white; background: #151518; }
+.language-select > div:focus-within { border-color: #a8ff78; outline: 2px solid #a8ff7840; }
+.translation-help { margin: 10px 0 0; color: #929299; font-size: 11px; line-height: 1.5; }
+.translate-button { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; padding: 12px; border: 0; border-radius: 9px; background: #a8ff78; color: #101012; font-size: 12px; font-weight: 600; cursor: pointer; }
+.translate-button:disabled { background: #24341f; color: #b2d59f; cursor: default; }
+.translate-button:focus-visible { outline: 2px solid white; outline-offset: 3px; }
 .output-card { padding: 15px; border-radius: 11px; background: #161618; }
 .output-card p { min-height: 64px; margin: 0; color: #a9a9ad; font-size: 11px; line-height: 1.55; }
 .output-card > div { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding-top: 11px; border-top: 1px solid #28282c; color: #66666b; font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }
