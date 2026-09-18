@@ -3,6 +3,14 @@ import test from 'node:test'
 import { requestImport, waitForSlot } from './importRequest'
 
 const busy = () => Response.json({ code: 'SERVER_BUSY', retryAfter: 5 }, { status: 503 })
+test('the default fetch keeps its browser Window receiver', async (context) => {
+  context.mock.method(globalThis, 'fetch', function (this: unknown) {
+    assert.equal(this, globalThis)
+    return Promise.resolve(Response.json({ id: 'browser-job' }, { status: 202 }))
+  })
+  const result = await requestImport('/api/media/youtube', {}, new AbortController().signal, () => {})
+  assert.equal(result.id, 'browser-job')
+})
 test('a full demo waits and starts automatically once capacity is available', async () => {
   let requests = 0
   const messages: string[] = []

@@ -10,7 +10,7 @@ export function waitForSlot(ms: number, signal: AbortSignal) {
 // Only retry an explicit pre-admission rejection. A network timeout might have
 // already created a job, so automatically replaying it could duplicate work.
 export async function requestImport(url: string, init: RequestInit, signal: AbortSignal, status: (message: string) => void,
-  dependencies = { fetch: globalThis.fetch, wait: waitForSlot }) {
+  dependencies = { fetch: globalThis.fetch.bind(globalThis), wait: waitForSlot }) {
   for (let attempt = 0; ; attempt++) {
     const response = await dependencies.fetch(url, { ...init, signal })
     const body = await response.json().catch(() => ({}))
