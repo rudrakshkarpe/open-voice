@@ -40,7 +40,8 @@ export default function App() {
   const targetName = targetLanguages.find((language) => language.code === targetCode)?.name ?? 'Original audio'
   const activeName = targetLanguages.find((language) => language.code === player.activeLanguage)?.name ?? 'Original audio'
   const error = fileError || player.error || session.error || session.job?.error
-  const preparing = session.uploading || ['importing', 'extracting', 'transcribing'].includes(session.job?.status ?? '')
+  const preparing = session.uploading || ['queued', 'importing', 'extracting', 'transcribing'].includes(session.job?.status ?? '')
+  const importMessage = session.message || session.job?.message || 'Opening your video…'
   const notice = playbackNotice({ phase: player.phase, playing: player.playing, activeName, targetName, switching: targetCode !== player.activeLanguage, failed: Boolean(player.translationError) })
   const actuallyPlaying = player.playing && player.phase === 'playing'
 
@@ -89,7 +90,7 @@ export default function App() {
     <main className={`${hasSource ? 'has-source' : ''} ${hasSource && !source.audioOnly && ratio < 1 ? 'is-portrait' : ''} ${dragging ? 'drag-over' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }}
       onDrop={(event) => { event.preventDefault(); setDragging(false); void loadFile(event.dataTransfer.files[0]) }}>
-      {error && <div className="error-banner" role="alert"><p>{error}</p>{hasSource && <button onClick={clearSource}>Choose another video<ArrowLeft size={14} /></button>}</div>}
+      {error && <div className="error-banner" role="alert"><p>{error}</p>{remote && !mediaUrl && !session.uploading && <button onClick={() => void loadYoutube()}>Try this link again<RotateCcw size={14} /></button>}{hasSource && <button onClick={clearSource}>Choose another video<ArrowLeft size={14} /></button>}</div>}
       {!hasSource ? <Welcome dragging={dragging} youtubeInput={youtubeInput} setYoutubeInput={setYoutubeInput} onYoutube={() => void loadYoutube()} onUpload={() => fileRef.current?.click()} onSample={loadSample} /> : <>
         <div className="workspace-heading"><div>{source.audioOnly ? <Headphones size={17} /> : <Video size={17} />}<h1 title={mediaName}>{mediaName}</h1></div><span className={`playback-status ${actuallyPlaying ? 'is-playing' : ''}`}><i />{error && !mediaUrl ? 'Couldn’t open video' : actuallyPlaying ? 'Playing' : player.phase === 'finished' ? 'Finished' : player.playing ? 'One moment…' : !mediaUrl ? 'Opening video…' : player.time > 0 ? 'Paused' : 'Ready to play'}</span></div>
         <div className="workspace">
@@ -100,7 +101,7 @@ export default function App() {
                 if (media.videoWidth && media.videoHeight) setRatio(media.videoWidth / media.videoHeight)
               }} onError={() => { player.pause(); setFileError('This browser can’t play this file. Try an H.264 MP4 or WebM.') }} />
               {source.audioOnly && <div className="audio-placeholder"><span><Headphones size={40} strokeWidth={1.25} /></span><strong>Just press play.</strong><p>Your audio, in a new language.</p></div>}
-              {!mediaUrl && <div className="import-placeholder"><Video size={28} strokeWidth={1.25} /><h2>{error ? 'This video couldn’t open.' : 'Opening your video…'}</h2><p>{error ? 'Try another link or upload a file.' : 'Longer clips can take a little longer. You can choose your language while we get it ready.'}</p></div>}
+              {!mediaUrl && <div className="import-placeholder" role="status" aria-live="polite"><Video size={28} strokeWidth={1.25} /><h2>{error ? 'This video couldn’t open.' : importMessage}</h2><p>{error ? 'Try this link again, or upload a file you have permission to use.' : 'You can choose a language while we get it ready. No need to resubmit the link.'}</p></div>}
               {showCaptions && caption && <div className="captions" lang={player.activeLanguage === 'original' ? undefined : player.activeLanguage}><strong dir="auto">{caption}</strong></div>}
               {mediaUrl && !player.playing && <button className="play" aria-label="Play video" onClick={togglePlayback}><Play size={26} fill="currentColor" /></button>}
             </div>

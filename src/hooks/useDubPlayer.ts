@@ -6,6 +6,7 @@ import { AudioQueue, bufferedAhead, canStartStream, chunkAt } from '../lib/audio
 import type { AudioChunk } from '../lib/audioQueue'
 import type { PlaybackPhase } from '../lib/experience'
 import { apiUrl } from '../lib/api'
+import { shouldRefreshTrack } from '../lib/trackRequests'
 
 const name = (language: string) => targetLanguages.find((item) => item.code === language)?.name ?? 'Original'
 
@@ -35,7 +36,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
   const starting = useRef(false)
   const epoch = useRef(0)
   const selection = useRef(0)
-  const requestMessage = useRef<string | null>(null)
+  const requestMessage = useRef('')
   const lastRequest = useRef({ at: 0, position: -1 })
   useEffect(() => { latest.current = { job, language } }, [job, language])
 
@@ -50,7 +51,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
     pause(); buffers.current.clear(); loading.current.clear(); downloadErrors.current.clear(); finished.current = false
     for (const controller of controllers.current) controller.abort()
     controllers.current.clear(); active.current = 'original'; setActiveLanguage('original'); setActivity([]); setTime(0); setError(''); setTranslationError(''); setAudioStarts(0); setDrift(0); setBuffered(0); setStalls(0)
-    selection.current++; requestMessage.current = null; lastRequest.current = { at: 0, position: -1 }
+    selection.current++; requestMessage.current = ''; lastRequest.current = { at: 0, position: -1 }
     if (video.current) { video.current.currentTime = 0; video.current.muted = false; video.current.playbackRate = 1 }
   }, [pause])
 
@@ -65,7 +66,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
     } catch (caught) { if (version === selection.current) requestMessage.current = caught instanceof Error ? caught.message : 'Connection failed.' }
   }, [])
   const jobId = job?.id
-  useEffect(() => { if (jobId) void requestTrack(jobId, language) }, [jobId, language, requestTrack])
+  useEffect(() => { requestMessage.current = ''; if (jobId) void requestTrack(jobId, language) }, [jobId, language, requestTrack])
   const seek = useCallback((next: number) => {
     epoch.current++; video.current?.pause(); stopVoice(); finished.current = false
     if (video.current) video.current.currentTime = next
@@ -94,7 +95,6 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
     const tick = async () => {
       const media = video.current
       if (!media) return
-      if (requestMessage.current !== null) { setError(requestMessage.current); requestMessage.current = null }
       const { job: current, language: target } = latest.current
       const position = media.currentTime; setTime(position)
       const targetTrack = current?.tracks[target]
@@ -102,7 +102,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
       const available = (lang: string) => (chunk: AudioChunk) => buffers.current.has(keyFor(lang, chunk))
 
       // Send a playhead revision, not a growing queue of requests for old choices.
-      if (current && target !== 'original' && targetTrack?.state !== 'ready' && Date.now() - lastRequest.current.at > 2000 && Math.abs(position - lastRequest.current.position) > 1) void requestTrack(current.id, target)
+      if (current && target !== 'original' && shouldRefreshTrack(targetTrack?.state, Boolean(requestMessage.current), Date.now() - lastRequest.current.at, position - lastRequest.current.position)) void requestTrack(current.id, target)
 
       const protectedKeys = new Set<string>()
       for (const lang of new Set([target, active.current])) {
@@ -135,7 +135,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
       const chunks = current?.tracks[active.current]?.segments ?? []
       media.muted = active.current !== 'original'
       const downloadError = [...downloadErrors.current.entries()].find(([key]) => key.startsWith(`${current?.id}/${target}/`))?.[1]
-      const targetError = targetTrack?.error ?? downloadError
+      const targetError = requestMessage.current || targetTrack?.error || downloadError
       setTranslationError(targetError ?? '')
       const preparation = target !== active.current ? targetError ? `${name(target)} needs attention · current audio unchanged` : `Buffering ${name(target)} near ${Math.floor(position)}s${desired.current ? ' · current audio continues' : ''}` : ''
       setBuffered(Math.round(bufferedAhead(chunks, position, available(active.current)) * 10) / 10)
