@@ -4,13 +4,17 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k -n web,gateway -c magenta,cyan \"vite\" \"tsx watch server/index.ts\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start": "node dist-server/index.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest"
@@ -19,12 +23,17 @@
     "@eslint/js": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@types/cors": "latest",
+    "@types/express": "latest",
+    "@types/node": "latest",
+    "concurrently": "latest",
     "eslint": "latest",
     "eslint-plugin-react-hooks": "latest",
     "eslint-plugin-react-refresh": "latest",
     "globals": "latest",
     "typescript": "latest",
     "typescript-eslint": "latest",
+    "tsx": "latest",
     "vite": "latest"
   }
 }
