@@ -32,12 +32,14 @@ Boson is a separate provider with its own credits/billing. InsForge's free hosti
 
 ## Public-demo safeguards
 
-- 200 MB and 10 minutes per clip, at most two incoming uploads and two source-processing jobs.
-- At most eight retained media sessions; expired disconnected sessions are removed after an hour.
+- 200 MB and 10 minutes per clip, at most two incoming uploads and two source-processing jobs. Accepted imports wait in a bounded queue when processing is occupied, rather than failing merely because two clips are transcribing.
+- At most eight retained media sessions including queued work. Sessions without a progress connection or status check for two minutes are cancelled and removed; connected tabs remain valid. This reconnect grace prevents abandoned tabs from holding capacity for an hour.
+- A full admission queue returns `503 SERVER_BUSY` with `Retry-After: 5`. The frontend retries that explicit rejection for at most 45 seconds. It does not replay ambiguous network failures or daily-limit errors, which could duplicate work or spend.
 - Three translated languages per video in production. Existing generated languages remain selectable.
 - A shared daily limit of 300 Boson requests, including transcription, translation and synthesis retries. This counter resets at UTC midnight **or server restart**. It is an abuse guard, not a monetary billing cap; configure provider-side spending controls separately.
 - The legacy endpoint issuing browser-accessible Boson session credentials is disabled in production.
 - The project/API credentials and runtime secrets are excluded from Git and Docker build context.
+- Transcription, translation and TTS share one provider-request slot, including TTS backoff. Failed language requests stop automatic playhead updates until the user retries or changes language.
 
 This is a bounded public hackathon demo, not a multi-tenant production service. Job IDs are unguessable capability URLs; anyone with a job URL can access its temporary media. Do not upload sensitive/private media. Authentication, durable per-user quotas and a durable job queue are future work. YouTube may block cloud-hosted downloaders even when a video is public; authorized local uploads remain the fallback.
 
@@ -93,7 +95,15 @@ The website workflow pins the OpenVoice commit for reproducibility. After pushin
 - Tested the built-in sample upload from the live website: English detection, Italian playback, Mandarin switching, switching back to cached Italian, pause and keyboard seek all worked. Browser warning/error logs were empty. Observed sync drift was 13–35 ms during spot checks, but one rebuffer occurred on reaching an uncached phrase after switching back. This is a smoke test, not a zero-stutter or load-test guarantee; first-time generation and cold starts can still introduce waits.
 - Rechecked the organization: Free plan, no Stripe subscription, one `shared-1x` / 512 MB service with scale-to-zero enabled.
 
-### Routine checks
+### YouTube import troubleshooting
+
+The reported Shorts URLs `fZph862_m5M` and `HnGxcShWNv4` both normalized correctly and downloaded on the cloud backend. The live frontend nevertheless reproduced **“The demo is busy”**: the original admission check conflated two ongoing source jobs, eight retained sessions, and incoming uploads. This was an application-capacity rejection, not evidence that the URL was invalid or that YouTube rejected it.
+
+The queue/reconnect-grace changes address that failure path without raising the daily speech allowance or upgrading hosting. The UI now shows waiting, checking YouTube, downloading, and extracting stages; failures offer a same-link retry. Expired SSE sessions stop reconnecting indefinitely and ask the user to reopen the video.
+
+Other cases remain distinct: clips longer than ten minutes, private/age/region restrictions, upstream YouTube throttling or bot checks, and speech-provider quotas. Downloader errors are categorized into actionable messages without exposing raw command output or cookies. The app does not bypass sign-in or bot checks. See the [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#http-error-429-too-many-requests-or-402-payment-required) for upstream download throttling.
+
+### Operational commands
 
 ```sh
 curl -fsS https://openvoice-b9f107db-78e0-4b30-b3ce-681932526b3b.fly.dev/api/health
