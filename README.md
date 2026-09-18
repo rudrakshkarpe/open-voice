@@ -1,5 +1,7 @@
 # OpenVoice
 
+Deployment configuration and the free-plan operating limits are documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 Paste a YouTube URL or upload a video, then switch languages with progressively generated voice and playback-synchronized captions. Playback no longer waits for a whole translated track. Uses the existing Boson API; no Hugging Face deployment or GPU is needed.
 
 ## Run
@@ -46,4 +48,4 @@ npm test
 
 Only process media you are authorized to use. YouTube URLs are restricted to recognized video links; arbitrary URLs, playlists, embedded credentials and additional downloader arguments are rejected.
 
-Uploads and extracted audio live under an OS temporary directory, not Git. Replacing a file cancels its job. Disconnected sessions expire after one hour; development-server restarts invalidate open sessions, so re-upload after a backend restart. This server binds to loopback for local development; public hosting needs authentication and per-user quotas.
+Uploads and extracted audio live under an OS temporary directory, not Git. Replacing a file cancels its job. Disconnected sessions expire after one hour; development-server restarts invalidate open sessions, so re-upload after a backend restart. Local development binds to loopback; the production container listens on its service port. The public demo has shared resource/request limits but no user authentication. See the deployment guide before exposing it or uploading sensitive media.
