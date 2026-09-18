@@ -153,6 +153,17 @@ async function createJob(name: string, status: Job['status']) {
 const busy = () => [...jobs.values()].filter((job) => ['importing', 'extracting', 'transcribing'].includes(job.status)).length >= 2
 
 export const mediaRouter = Router()
+let incomingUploads = 0
+// Reject before accepting large bodies; never let anonymous uploads fill disk.
+mediaRouter.use((request, response, next) => {
+  if (request.method !== 'POST' || !['/', '/youtube'].includes(request.path)) return next()
+  if (jobs.size >= 8 || incomingUploads >= 2 || busy()) return response.status(429).json({ error: 'The demo is busy. Please try again shortly.' })
+  incomingUploads++
+  let released = false
+  const release = () => { if (!released) { released = true; incomingUploads-- } }
+  response.once('finish', release); response.once('close', release)
+  next()
+})
 mediaRouter.post('/', upload.single('file'), async (request, response) => {
   if (!request.file) return response.status(400).json({ error: 'Choose an audio or video file.' })
   if (busy()) {
@@ -206,6 +217,7 @@ mediaRouter.post('/:id/tracks', (request, response) => {
   if (!Number.isSafeInteger(selection) || selection < 0) return response.status(400).json({ error: 'Invalid selection revision.' })
   if (typeof position !== 'number' || !Number.isFinite(position) || position < 0 || position > 600) return response.status(400).json({ error: 'Invalid playback position.' })
   if (selection < job.selection) return response.status(202).json({ state: 'superseded' })
+  if (process.env.NODE_ENV === 'production' && language !== 'original' && !job.tracks[language] && Object.keys(job.tracks).length >= 3) return response.status(429).json({ error: 'This public demo supports three translated languages per video. Start a new video to try others.' })
   job.selection = selection
   job.requestedLanguage = language
   job.position = position

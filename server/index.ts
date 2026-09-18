@@ -10,13 +10,17 @@ config({ path: '.env.local', override: true })
 
 const app = express()
 const port = Number(process.env.PORT ?? 8787)
+const host = process.env.HOST ?? '127.0.0.1'
 const bosonApiKey = process.env.BOSON_API_KEY
 const bosonBaseUrl = 'https://api.boson.ai/v1'
 
-app.use(cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'] }))
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? 'http://127.0.0.1:5173,http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean)
+app.disable('x-powered-by')
+app.use(cors({ origin: allowedOrigins }))
 app.use(express.json({ limit: '1mb' }))
-app.use('/api/media', mediaRouter)
 app.use('/api', (_request, response, next) => { response.set('Cache-Control', 'no-store'); next() })
+app.get('/api/health', (_request, response) => response.json({ status: 'ok', speechConfigured: Boolean(bosonApiKey) }))
+app.use('/api/media', mediaRouter)
 
 const bosonHeaders = () => ({
   Authorization: `Bearer ${bosonApiKey}`,
@@ -35,7 +39,8 @@ app.get('/api/boson/status', async (_request, response) => {
   }
 })
 
-app.post('/api/boson/realtime-secret', async (_request, response) => {
+// Legacy browser-direct mode is intentionally unavailable on the public demo.
+if (process.env.NODE_ENV !== 'production') app.post('/api/boson/realtime-secret', async (_request, response) => {
   if (!bosonApiKey) return response.status(503).json({ error: { message: 'BOSON_API_KEY is not configured on the gateway.' } })
   try {
     const upstream = await fetch(`${bosonBaseUrl}/realtime/client_secrets`, {
@@ -62,6 +67,6 @@ if (existsSync(clientDirectory)) {
   app.use((_request, response) => response.sendFile(path.join(clientDirectory, 'index.html')))
 }
 
-app.listen(port, '127.0.0.1', () => {
-  console.log(`OpenVoice gateway listening on http://127.0.0.1:${port}`)
+app.listen(port, host, () => {
+  console.log(`OpenVoice gateway listening on http://${host}:${port}`)
 })

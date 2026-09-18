@@ -3,8 +3,26 @@ dist
 dist-server
 .env
 .env.local
+.env.*.local
+.insforge/
+fly.toml
 .DS_Store
 *.log
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf

@@ -1,4 +1,5 @@
 import WebSocket from 'ws'
+import { providerBudget } from './budget.js'
 
 type Event = { type: string; transcript?: string; delta?: string; text?: string; error?: { message?: string }; response?: { status?: string } }
 
@@ -7,6 +8,7 @@ function realtime(kind: 'transcribe' | 'translate', input: Buffer | string, sign
   return new Promise((resolve, reject) => {
     if (!process.env.BOSON_API_KEY) return reject(new Error('Configure BOSON_API_KEY on the server.'))
     if (signal.aborted) return reject(new Error('Cancelled'))
+    providerBudget.take()
     const ws = new WebSocket('wss://api.boson.ai/v1/realtime?model=higgs-realtime', {
       headers: { Authorization: `Bearer ${process.env.BOSON_API_KEY}` }, handshakeTimeout: 15000,
     })
@@ -70,6 +72,7 @@ export const translate = (text: string, language: string, signal: AbortSignal, o
 
 export async function synthesize(text: string, signal: AbortSignal) {
   for (let attempt = 0; attempt < 5; attempt++) {
+  providerBudget.take()
   const response = await fetch('https://api.boson.ai/v1/audio/speech', {
     method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]),
     headers: { Authorization: `Bearer ${process.env.BOSON_API_KEY}`, 'Content-Type': 'application/json' },

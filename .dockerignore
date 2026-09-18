@@ -1,0 +1,15 @@
+**/.env*
+.insforge
+.git
+.github
+.agents
+.claude
+.cursor
+fly.toml
+node_modules
+dist
+dist-server
+*.log
+*.tsbuildinfo
+docs
+README.md
