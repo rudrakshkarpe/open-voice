@@ -4,7 +4,7 @@ Every video, in your language.
 
 Paste a YouTube link or upload a clip. OpenVoice transcribes the speech, translates it, and plays a new voice with captions that follow the video.
 
-[Try the app](https://rudrakshkarpe.com/openvoice/) · [Architecture](docs/ARCHITECTURE.md) · [Deployment](docs/DEPLOYMENT.md)
+[Try the app](https://rudrakshkarpe.com/openvoice/) · [Interactive presentation](https://rudrakshkarpe.com/presentations/openvoice) · [Architecture](docs/ARCHITECTURE.md) · [Deployment](docs/DEPLOYMENT.md)
 
 ![OpenVoice home screen with its multilingual headline, YouTube input and file upload](docs/assets/openvoice-home.png)
 
