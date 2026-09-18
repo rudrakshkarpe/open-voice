@@ -1,53 +1,126 @@
 # OpenVoice
 
-Deployment configuration and the free-plan operating limits are documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Every video, in your language.
 
-Paste a YouTube URL or upload a video, then switch languages with progressively generated voice and playback-synchronized captions. Playback no longer waits for a whole translated track. Uses the existing Boson API; no Hugging Face deployment or GPU is needed.
+Paste a YouTube link or upload a clip. OpenVoice transcribes the speech, translates it, and plays a new voice with captions that follow the video.
 
-## Run
+[Try the app](https://rudrakshkarpe.com/openvoice/) · [Architecture](docs/ARCHITECTURE.md) · [Deployment](docs/DEPLOYMENT.md)
 
-```bash
-npm install
+![OpenVoice home screen with its multilingual headline, YouTube input and file upload](docs/assets/openvoice-home.png)
+
+## Watch in another language
+
+1. Paste a public YouTube video or Shorts link, upload a file, or try the sample.
+2. Choose a language under **Listen in**. The current audio continues while the first translated phrases prepare.
+3. Keep watching. Audio switches automatically, captions follow the audible language, and upcoming phrases load in the background.
+
+The player keeps the video's aspect ratio. One language selector, playback controls and a caption toggle are the main interface; processing diagnostics stay out of the way.
+
+![OpenVoice player showing translated playback and the language selector](docs/assets/openvoice-player.png)
+
+## Architecture
+
+```mermaid
+flowchart TD
+    input["Upload or YouTube URL"] --> server["Express · Node.js"]
+    server --> media["yt-dlp for YouTube · FFprobe / FFmpeg"]
+    media --> pcm["24 kHz mono audio · 4–9 second sections"]
+    pcm --> stt["Higgs STT · source transcript"]
+    stt --> translation["Higgs Realtime · text translation"]
+    translation --> speech["Higgs TTS · translated speech"]
+    speech --> wav["FFmpeg · paced WAV sections"]
+    stt --> events["SSE · captions and progress"]
+    wav --> events
+    events --> player["React · Web Audio · video clock"]
+    wav -->|HTTP audio| player
+    server -->|HTTP video| player
+```
+
+This is **progressive, phrase-level delivery**. Each section finishes translation and synthesis before publication; the whole video does not need to finish first. SSE carries text, status and audio URLs—not audio bytes. The browser fetches and decodes upcoming sections, then schedules them back-to-back on the Web Audio clock.
+
+Generation prioritizes the playhead and the selected language. Completed sections are cached for the session. Longer translations use bounded, pitch-preserving tempo adjustment; when they still need more time, the video slows to match. If generation falls behind, audio and video pause together and resume once buffered.
+
+[Playback timing, queues, endpoints and failure handling →](docs/ARCHITECTURE.md)
+
+## Run locally
+
+Requires **Node.js 22+**, **FFmpeg / ffprobe**, a recent **yt-dlp**, and a Boson API key with available credits. No InsForge account or GPU is needed for local development.
+
+```sh
+# macOS media dependencies
+brew install ffmpeg yt-dlp
+
+git clone https://github.com/rudrakshkarpe/open-voice.git
+cd open-voice
+npm ci
 cp .env.example .env.local
-# Add the server-side BOSON_API_KEY to .env.local
+```
+
+Set `BOSON_API_KEY` in `.env.local`, then start both services:
+
+```sh
 npm run dev
 ```
 
-Requires Node.js 22+ and FFmpeg / ffprobe on PATH. YouTube imports additionally require a recent [yt-dlp](https://github.com/yt-dlp/yt-dlp). On macOS:
+Open [localhost:5173](http://127.0.0.1:5173/). Vite serves the frontend and proxies `/api` to Express on port `8787`. Leave `VITE_API_ORIGIN` empty locally.
 
-```bash
-brew install ffmpeg yt-dlp
-```
+## Boson AI
 
-Open `http://127.0.0.1:5173`. Paste a public YouTube video, Shorts, or youtu.be link, upload a browser-playable MP4, MOV, WebM, MP3, or WAV, or use the bundled sample. Limits: 200 MB and 10 minutes. YouTube imports use a browser-compatible H.264 MP4 up to 720p; availability depends on YouTube and the formats it serves. Live, upcoming, private, age-restricted and sign-in-required videos are not supported. No browser cookies or credentials are imported; use an authorized local file if a URL cannot be fetched.
+The integration lives in [`server/boson.ts`](server/boson.ts). All provider requests originate on the server and authenticate with `BOSON_API_KEY` as a Bearer token. Follow [Boson's authentication guide](https://docs.boson.ai/authentication) to create a key; never put it in a `VITE_` variable or commit it.
 
-The entry screen puts the link field, file picker and limits together. Its multilingual headline has a pause control and honors reduced-motion preferences. In the player, choose **Listen in** once: preparation and switching happen automatically while the current audio continues. There is no second translation play button or whole-track progress bar. The CC button toggles captions. **New video** stops playback, cancels the current session and returns to importing. Actual interruptions and retryable errors still have a concise visible status.
+| Stage | Current configuration |
+| --- | --- |
+| Transcription | `higgs-stt-3.1` through a Realtime WebSocket session; explicit commits of 24 kHz PCM audio |
+| Translation | `higgs-realtime`, text-only output; nearby transcript sections provide context |
+| Speech | `higgs-tts-3`, voice `chloe`, MP3 output from `/v1/audio/speech` |
+| Playback preparation | FFmpeg decodes speech, adjusts timing and writes individual WAV sections |
 
-## How it works
+Transcription, translation and speech share one provider-request slot to limit concurrency. TTS retries rate-limit responses with bounded backoff. Source-language detection uses accumulated transcript evidence; it is not an acoustic confidence score.
 
-1. Express receives the upload, or yt-dlp fetches the YouTube video into a temporary directory. FFprobe checks duration, dimensions, and the audio track. Portrait and landscape videos keep their native aspect ratio.
-2. FFmpeg extracts 24 kHz mono PCM independently of the video's volume or playback. Signal levels reject silent tracks. Developer diagnostics can play the exact transcription input.
-3. Quiet-boundary sections (4–9 seconds) go to Higgs STT via server-side WebSocket sessions using explicit commits. Each section retains its source timestamps. No transcription is synthesized from a filename or a character's script.
-4. Accumulated transcript evidence estimates the source language; short or ambiguous text remains unidentified. Progress and transcript sections arrive through SSE while the rest of the clip processes.
-5. Choose **Italian**, **Mandarin Chinese**, or another target under **Listen in**. Translation starts when a source section is ready, without waiting for the remaining transcript. Neighboring text is context for natural phrasing. Each 4–9-second source section produces its own immutable WAV, published immediately. FFmpeg performs bounded, pitch-preserving tempo adjustment (at most 1.35×); longer speech paces the video more slowly instead of cutting words. Abnormally long output fails with a retry.
-6. The browser switches as soon as there is a short decoded buffer at the current playback position (normally at least two seconds), not when progress reaches 100%. The existing audio continues during that first-phrase delay. Caching stays in the background. The server prioritizes the current position and upcoming sections, then backfills earlier sections; seeking and language changes update that priority. Completed sections are reused.
-7. Upcoming PCM sections are decoded ahead and scheduled back-to-back on the Web Audio clock, avoiding per-sentence audio-element reloads. If the provider falls behind, video and voice pause together with a short status message, then automatically resume when enough audio arrives. Up to 48 decoded sections stay cached in the browser. Pause, seek, source replacement and language changes cancel scheduled audio. Open `http://127.0.0.1:5173/?debug=1` before importing to reveal developer diagnostics: recent switches, buffered seconds, stream starts, rebuffer events, clock drift and extracted audio.
-8. Captions follow the **active** audio, not the language still preparing. They appear in short phrases as the video clock advances, stay still on pause, and reset on rewind. The full source transcript is in developer diagnostics. Phrase timings are estimated within source sections, not provider word alignment.
+The generated voice is a preset, not a clone of the original speaker. Translation quality and pronunciation vary by language.
 
-This is **progressive, phrase-level streaming**, not zero-latency sample-by-sample speech conversion or lip synchronization. The first source phrase still needs translation, synthesis and decoding. Generation can lag behind playback or hit provider rate limits; smooth playback is not guaranteed under those conditions. There is no whole-video preparation gate. Translation/TTS work is serialized across jobs, with TTS rate-limit retries. Provider quality varies by language. Background music is not preserved, and there is no speaker cloning or diarization. Source-language detection is transcript-based, not an acoustic confidence score.
+## Infrastructure
 
-The original key is never committed or sent to the browser. See [the playback architecture](docs/ARCHITECTURE.md).
+| Layer | How it is set up |
+| --- | --- |
+| Frontend | React, TypeScript and Vite. The existing website's GitHub Pages workflow builds a pinned OpenVoice commit and publishes it under `/openvoice/`. |
+| Backend | Express on **InsForge Custom Compute**. The [Dockerfile](Dockerfile) packages Node 22, FFmpeg and yt-dlp, running as a non-root user on port `8080`. |
+| Hosting configuration | One `shared-1x`, 512 MB service with scale-to-zero. InsForge manages the underlying compute; there is no separate Google Cloud deployment. |
+| Media and jobs | In-memory jobs and temporary files in the backend container. No database, object-storage bucket or durable media library. |
+| Provider | Boson AI, called directly by the backend. Its credits and billing are separate from InsForge hosting. |
 
-## Verification
+In production, `VITE_BASE_PATH=/openvoice/` sets the asset path and `VITE_API_ORIGIN` points to the compute backend. CORS allows the website origins. The Boson key stays in the backend runtime environment, never in the Pages build.
 
-```bash
-npm run build
+InsForge is used for container hosting—not its auth, database, storage, Edge Functions or AI gateway. LiveKit is not part of this pipeline: the input is recorded media, not a live call.
+
+The [deployment guide](docs/DEPLOYMENT.md) records the linked project, runtime variables, deploy commands, free-plan constraints and rollback procedure. [`scripts/deploy-insforge.mjs`](scripts/deploy-insforge.mjs) deploys the backend without putting the API key in command arguments.
+
+## Demo boundaries
+
+- **200 MB / 10 minutes per clip.** Uploads accept browser-playable MP4, MOV, WebM, MP3 and WAV. YouTube imports request H.264/AAC MP4 up to 720p.
+- **Public, accessible YouTube videos only.** Private, live, age-restricted or sign-in-required videos are not supported. Cloud downloads can still be blocked; an authorized local file is the fallback.
+- **Shared capacity.** The hosted demo retains up to eight sessions, processes two source jobs at once, allows three translated languages per video and has a shared 300-provider-request daily guard. The request counter also resets on restart; it is not a billing cap.
+- **Temporary sessions.** Disconnected sessions expire after a two-minute reconnect grace. A backend restart clears jobs; reopen the video afterward. Scale-to-zero can add a cold-start delay.
+- **Not zero-latency dubbing.** First phrases take time to generate, captions use approximate phrase timing, and buffering can occur. There is no lip-sync, speaker diarization or background-music preservation.
+- **No user authentication.** Anyone with a session's media URL can access its temporary files. Only process media you are authorized to use; do not upload sensitive material to the public demo.
+
+## Development
+
+```sh
 npm run lint
 npm test
+npm run build
 ```
 
-Only process media you are authorized to use. YouTube URLs are restricted to recognized video links; arbitrary URLs, playlists, embedded credentials and additional downloader arguments are rejected.
+Open the app with `?debug=1` before importing to inspect the source transcript, extracted audio, language switches, buffer coverage and clock drift.
 
-Uploads and extracted audio live under an OS temporary directory, not Git. Replacing a file cancels its job. Disconnected sessions expire after a two-minute reconnect grace; connected tabs stay valid. Backend restarts invalidate open sessions, so reopen the video after a restart. Local development binds to loopback; the production container listens on its service port. The public demo has shared resource/request limits but no user authentication. See the deployment guide before exposing it or uploading sensitive media.
+| Where | Responsibility |
+| --- | --- |
+| [`src/components/Welcome.tsx`](src/components/Welcome.tsx) | Landing screen and imports |
+| [`src/hooks/useMediaSession.ts`](src/hooks/useMediaSession.ts) | Session lifecycle, progress events and import retries |
+| [`src/hooks/useDubPlayer.ts`](src/hooks/useDubPlayer.ts) | Language switching, buffering and video synchronization |
+| [`src/lib/audioQueue.ts`](src/lib/audioQueue.ts) | Web Audio scheduling |
+| [`server/media.ts`](server/media.ts) | Media routes, extraction and translation jobs |
+| [`server/boson.ts`](server/boson.ts) | Boson transcription, translation and speech |
 
-Imports now wait in a bounded processing queue instead of failing when two clips are transcribing. The interface shows checking, downloading and extraction stages, with a same-link retry on failure. If all eight session slots are occupied, it waits and retries admission for up to 45 seconds; abandoned sessions release capacity after two minutes. All speech stages share one provider-request slot, and rejected language requests no longer trigger continuous playhead-update retries. The daily speech allowance, three-language demo limit, ten-minute clip limit and 200 MB upload limit are unchanged.
+Tests cover queues, session expiry, import recovery, segmentation, captions and playback scheduling. Provider latency, YouTube availability and speech quality still need live checks.
