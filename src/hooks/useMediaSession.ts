@@ -28,12 +28,17 @@ export function useMediaSession() {
       if (current.current === jobId) abort.current?.abort()
     }
   }, [jobId])
-  const submit = useCallback(async (file: File | string) => {
-    const version = ++revision.current
+  const clear = useCallback(() => {
+    revision.current++
     abort.current?.abort(); events.current?.close()
     const previous = current.current
-    if (previous) void fetch(`/api/media/${previous}`, { method: 'DELETE' })
-    current.current = null; setJob(null); setError(''); setUploading(true)
+    if (previous) void fetch(`/api/media/${previous}`, { method: 'DELETE' }).catch(() => undefined)
+    current.current = null; setJob(null); setError(''); setUploading(false)
+  }, [])
+  const submit = useCallback(async (file: File | string) => {
+    clear()
+    const version = revision.current
+    setUploading(true)
     const controller = new AbortController(); abort.current = controller
     try {
       const form = new FormData(); if (typeof file !== 'string') form.append('file', file)
@@ -48,7 +53,7 @@ export function useMediaSession() {
     } catch (caught) {
       if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : 'Upload failed.')
     } finally { if (version === revision.current) setUploading(false) }
-  }, [])
+  }, [clear])
 
-  return { job, upload: submit, importUrl: submit, uploading, error }
+  return { job, upload: submit, importUrl: submit, uploading, error, clear }
 }

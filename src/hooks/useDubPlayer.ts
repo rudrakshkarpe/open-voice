@@ -4,6 +4,7 @@ import { targetLanguages } from '../lib/languages'
 import { videoCorrection } from '../lib/playback'
 import { AudioQueue, bufferedAhead, canStartStream, chunkAt } from '../lib/audioQueue'
 import type { AudioChunk } from '../lib/audioQueue'
+import type { PlaybackPhase } from '../lib/experience'
 
 const name = (language: string) => targetLanguages.find((item) => item.code === language)?.name ?? 'Original'
 
@@ -17,7 +18,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
   const controllers = useRef(new Set<AbortController>())
   const [playing, setPlaying] = useState(false)
   const [time, setTime] = useState(0)
-  const [state, setState] = useState('Paused')
+  const [status, setStatus] = useState<{ phase: PlaybackPhase; message: string }>({ phase: 'paused', message: 'Paused' })
   const [error, setError] = useState('')
   const [translationError, setTranslationError] = useState('')
   const [audioStarts, setAudioStarts] = useState(0)
@@ -38,13 +39,17 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
   useEffect(() => { latest.current = { job, language } }, [job, language])
 
   const stopVoice = useCallback(() => { queue.current?.stop(); queue.current = null }, [])
+  const setState = useCallback((message: string, phase: PlaybackPhase) => {
+    setStatus((previous) => previous.message === message && previous.phase === phase ? previous : { message, phase })
+  }, [])
   const pause = useCallback(() => {
-    desired.current = false; epoch.current++; video.current?.pause(); stopVoice(); setPlaying(false); setState('Paused')
-  }, [stopVoice])
+    desired.current = false; epoch.current++; video.current?.pause(); stopVoice(); setPlaying(false); setState('Paused', 'paused')
+  }, [stopVoice, setState])
   const reset = useCallback(() => {
     pause(); buffers.current.clear(); loading.current.clear(); downloadErrors.current.clear(); finished.current = false
     for (const controller of controllers.current) controller.abort()
     controllers.current.clear(); active.current = 'original'; setActiveLanguage('original'); setActivity([]); setTime(0); setError(''); setTranslationError(''); setAudioStarts(0); setDrift(0); setBuffered(0); setStalls(0)
+    selection.current++; requestMessage.current = null; lastRequest.current = { at: 0, position: -1 }
     if (video.current) { video.current.currentTime = 0; video.current.muted = false; video.current.playbackRate = 1 }
   }, [pause])
 
@@ -133,8 +138,8 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
       setTranslationError(targetError ?? '')
       const preparation = target !== active.current ? targetError ? `${name(target)} needs attention · current audio unchanged` : `Buffering ${name(target)} near ${Math.floor(position)}s${desired.current ? ' · current audio continues' : ''}` : ''
       setBuffered(Math.round(bufferedAhead(chunks, position, available(active.current)) * 10) / 10)
-      if (!desired.current || starting.current) { if (!desired.current) setState(finished.current ? 'Finished · press play to restart' : preparation || 'Paused'); return }
-      if (media.readyState < 3 || media.seeking) { stopVoice(); setState('Buffering video…'); return }
+      if (!desired.current || starting.current) { if (!desired.current) setState(finished.current ? 'Finished · press play to restart' : preparation || 'Paused', finished.current ? 'finished' : 'paused'); return }
+      if (media.readyState < 3 || media.seeking) { stopVoice(); setState('Buffering video…', 'waiting-video'); return }
 
       if (active.current !== 'original') {
         if (!context.current || context.current.state !== 'running') { pause(); setError('Press play to enable translated audio.'); return }
@@ -150,15 +155,15 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
         if (queue.current?.exhausted) {
           const end = queue.current.tail!.chunk.end
           stopVoice(); media.pause(); media.currentTime = Math.min(end, media.duration)
-          if (end >= (current?.duration ?? media.duration) - 0.05) { finished.current = true; pause(); setState('Finished · press play to restart'); return }
+          if (end >= (current?.duration ?? media.duration) - 0.05) { finished.current = true; pause(); setState('Finished · press play to restart', 'finished'); return }
           setStalls((count) => count + 1)
         }
-        if (media.ended && queue.current) { setState('Finishing translated audio…'); return }
-        if (media.ended && !queue.current) { finished.current = true; pause(); setState('Finished · press play to restart'); return }
+        if (media.ended && queue.current) { setState('Finishing translated audio…', 'playing'); return }
+        if (media.ended && !queue.current) { finished.current = true; pause(); setState('Finished · press play to restart', 'finished'); return }
         if (!queue.current && !canStartStream(chunks, media.currentTime, current?.duration ?? 0, available(active.current))) {
-          media.pause(); setState(`Buffering the next ${name(active.current)} phrase…`); return
+          media.pause(); setState(`Buffering the next ${name(active.current)} phrase…`, 'waiting-audio'); return
         }
-      } else if (media.ended) { finished.current = true; pause(); setState('Finished · press play to restart'); return }
+      } else if (media.ended) { finished.current = true; pause(); setState('Finished · press play to restart', 'finished'); return }
 
       if (media.paused) {
         starting.current = true; const version = epoch.current
@@ -178,11 +183,11 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
         const clock = queue.current.clock()
         if (clock) { setDrift(Math.round((clock.position - media.currentTime) * 1000)); media.playbackRate = clock.rate * videoCorrection(clock.position, media.currentTime) }
       } else { media.playbackRate = 1; setDrift(0) }
-      setState(preparation ? `Playing ${name(active.current)} · ${preparation}` : `Playing ${name(active.current)}${active.current !== 'original' ? ' · progressive stream' : ''}`)
+      setState(preparation ? `Playing ${name(active.current)} · ${preparation}` : `Playing ${name(active.current)}${active.current !== 'original' ? ' · progressive stream' : ''}`, 'playing')
     }
     const interval = setInterval(() => { void tick() }, 40)
     return () => { clearInterval(interval); for (const controller of localControllers) controller.abort(); stopVoice() }
-  }, [pause, stopVoice, requestTrack])
+  }, [pause, stopVoice, requestTrack, setState])
 
-  return { videoRef: video, playing, time, state, error, translationError, audioStarts, drift, buffered, stalls, activeLanguage, activity, play, toggle, pause, reset, seek, buffering, retry }
+  return { videoRef: video, playing, time, state: status.message, phase: status.phase, error, translationError, audioStarts, drift, buffered, stalls, activeLanguage, activity, play, toggle, pause, reset, seek, buffering, retry }
 }
