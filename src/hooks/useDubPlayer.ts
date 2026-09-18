@@ -5,6 +5,7 @@ import { videoCorrection } from '../lib/playback'
 import { AudioQueue, bufferedAhead, canStartStream, chunkAt } from '../lib/audioQueue'
 import type { AudioChunk } from '../lib/audioQueue'
 import type { PlaybackPhase } from '../lib/experience'
+import { apiUrl } from '../lib/api'
 
 const name = (language: string) => targetLanguages.find((item) => item.code === language)?.name ?? 'Original'
 
@@ -58,7 +59,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
     const position = video.current?.currentTime ?? 0
     lastRequest.current = { at: Date.now(), position }
     try {
-      const response = await fetch(`/api/media/${id}/tracks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ language: target, retry, selection: version, position }) })
+      const response = await fetch(apiUrl(`/api/media/${id}/tracks`), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ language: target, retry, selection: version, position }) })
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error ?? 'Media session expired or unavailable. Upload the video again.') }
       if (version === selection.current) requestMessage.current = ''
     } catch (caught) { if (version === selection.current) requestMessage.current = caught instanceof Error ? caught.message : 'Connection failed.' }
@@ -113,7 +114,7 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
           context.current ??= new AudioContext()
           loading.current.add(key)
           const controller = new AbortController(); localControllers.add(controller)
-          void fetch(chunk.audioUrl, { signal: controller.signal }).then(async (response) => {
+          void fetch(apiUrl(chunk.audioUrl), { signal: controller.signal }).then(async (response) => {
             if (!response.ok) throw new Error('An audio section could not be downloaded. Retry the stream.')
             const buffer = await context.current!.decodeAudioData(await response.arrayBuffer())
             if (!controller.signal.aborted && latest.current.job?.id === current?.id) buffers.current.set(key, buffer)

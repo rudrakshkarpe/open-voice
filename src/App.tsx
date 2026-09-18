@@ -6,6 +6,7 @@ import { Welcome } from './components/Welcome'
 import { targetLanguages } from './lib/languages'
 import { captionAt, captionCues } from './lib/captions'
 import { isAudioFile, playbackNotice, validateMediaFile } from './lib/experience'
+import { apiUrl } from './lib/api'
 
 const clock = (time: number) => `${Math.floor(time / 60)}:${Math.floor(time % 60).toString().padStart(2, '0')}`
 const debug = new URLSearchParams(window.location.search).get('debug') === '1'
@@ -27,7 +28,7 @@ export default function App() {
   const { videoRef } = player
   const sourceRef = useRef('')
   const loadRevision = useRef(0)
-  const mediaUrl = remote ? session.job?.videoUrl ?? '' : source.url
+  const mediaUrl = remote ? session.job?.videoUrl ? apiUrl(session.job.videoUrl) : '' : source.url
   const mediaName = remote ? session.job?.name ?? 'YouTube video' : source.name
   const hasSource = Boolean(source.url || remote)
   const activeTrack = session.job?.tracks[player.activeLanguage]
@@ -72,7 +73,7 @@ export default function App() {
   const loadSample = async () => {
     const revision = ++loadRevision.current
     try {
-      const response = await fetch('/media/demo-source.mp4')
+      const response = await fetch(`${import.meta.env.BASE_URL}media/demo-source.mp4`)
       if (!response.ok) throw new Error('Sample could not be loaded.')
       const blob = await response.blob()
       if (revision === loadRevision.current) await loadFile(new File([blob], 'A moment on the court.mp4', { type: 'video/mp4' }))
@@ -122,7 +123,7 @@ export default function App() {
           </aside>
         </div>
         {debug && <details className="diagnostics"><summary>Developer diagnostics</summary><p>{player.state}</p><p>{player.buffered.toFixed(1)}s buffered · {player.audioStarts} stream starts · {player.stalls} rebuffer events · sync drift {player.drift} ms</p>{player.activity.map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}
-          {session.job?.extractedAudioUrl && <details><summary>Extracted audio</summary><audio ref={previewRef} src={session.job.extractedAudioUrl} controls onPlay={player.pause} /><p>24 kHz mono · {session.job.rmsDb?.toFixed(1)} dBFS RMS</p></details>}
+          {session.job?.extractedAudioUrl && <details><summary>Extracted audio</summary><audio ref={previewRef} src={apiUrl(session.job.extractedAudioUrl)} controls onPlay={player.pause} /><p>24 kHz mono · {session.job.rmsDb?.toFixed(1)} dBFS RMS</p></details>}
           <details><summary>Source transcript</summary><div className="transcript">{session.job?.segments.map((item) => <button key={item.index} onClick={() => player.seek(item.start)}><time>{clock(item.start)}</time><span>{item.text || item.error || (item.state === 'ready' ? 'No speech' : 'Transcribing…')}</span></button>)}</div></details>
         </details>}
       </>}

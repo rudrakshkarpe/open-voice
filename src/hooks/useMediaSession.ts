@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { apiUrl } from '../lib/api'
 
 export type Segment = { index: number; start: number; end: number; state: 'pending' | 'ready' | 'error'; text: string; error?: string }
 export type Track = { state: 'queued' | 'preparing' | 'paused' | 'ready' | 'error'; completed: number; total: number; message: string; segments: { index: number; start: number; end: number; text: string; audioStart: number; audioEnd: number; captionEnd: number; audioUrl: string }[]; error?: string; maxSpeed?: number; duration?: number; slowedSections?: number }
@@ -16,7 +17,7 @@ export function useMediaSession() {
 
   const jobId = job?.id ?? null
   useEffect(() => {
-    const stream = jobId ? new EventSource(`/api/media/${jobId}/events`) : null
+    const stream = jobId ? new EventSource(apiUrl(`/api/media/${jobId}/events`)) : null
     events.current = stream
     if (stream) {
       stream.onmessage = (message) => { if (current.current === jobId) { setJob(JSON.parse(message.data)); setError('') } }
@@ -32,7 +33,7 @@ export function useMediaSession() {
     revision.current++
     abort.current?.abort(); events.current?.close()
     const previous = current.current
-    if (previous) void fetch(`/api/media/${previous}`, { method: 'DELETE' }).catch(() => undefined)
+    if (previous) void fetch(apiUrl(`/api/media/${previous}`), { method: 'DELETE' }).catch(() => undefined)
     current.current = null; setJob(null); setError(''); setUploading(false)
   }, [])
   const submit = useCallback(async (file: File | string) => {
@@ -42,7 +43,7 @@ export function useMediaSession() {
     const controller = new AbortController(); abort.current = controller
     try {
       const form = new FormData(); if (typeof file !== 'string') form.append('file', file)
-      const response = await fetch(typeof file === 'string' ? '/api/media/youtube' : '/api/media', {
+      const response = await fetch(apiUrl(typeof file === 'string' ? '/api/media/youtube' : '/api/media'), {
         method: 'POST', body: typeof file === 'string' ? JSON.stringify({ url: file }) : form,
         headers: typeof file === 'string' ? { 'Content-Type': 'application/json' } : undefined, signal: controller.signal,
       })
