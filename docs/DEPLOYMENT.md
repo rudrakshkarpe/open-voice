@@ -80,6 +80,21 @@ The website workflow pins the OpenVoice commit for reproducibility. After pushin
 
 ## Verification and operations
 
+### Initial release — 2026-09-18
+
+- Frontend release: `d262d8a1b39c48da5b7f147fc5c6c1cceca1865d`.
+- Website integration: `afd0ebf1ab0a31d098341d59fe7a5828c9b83a03`.
+- [Pages build and deployment run](https://github.com/rudrakshkarpe/rudrakshkarpe.com/actions/runs/35394430828) (website repository access required).
+- Backend image: `registry.fly.io/openvoice-b9f107db-78e0-4b30-b3ce-681932526b3b@sha256:e51a069eed6e0569ded1054ec03c32d167dcd3f49c2bdbae24f3eff94d935d0e`.
+- Local lint, all 36 automated tests, production/subpath builds and Docker build passed. GitHub also passed the app checks and the existing website build.
+- Cloud health returned HTTP 200 with speech configured; the credential-issuing endpoint returned HTTP 404 in production.
+- Pages deployment succeeded. The homepage and app assets returned HTTP 200; `/openvoice` redirects to `/openvoice/`.
+- Imported the supplied YouTube clip in the cloud, detected English, and progressively transcribed all 11 sections. Generated Italian caption/audio sections and verified HTTP 206 range responses for video and translated WAV files, with the website's CORS origin allowed.
+- Tested the built-in sample upload from the live website: English detection, Italian playback, Mandarin switching, switching back to cached Italian, pause and keyboard seek all worked. Browser warning/error logs were empty. Observed sync drift was 13–35 ms during spot checks, but one rebuffer occurred on reaching an uncached phrase after switching back. This is a smoke test, not a zero-stutter or load-test guarantee; first-time generation and cold starts can still introduce waits.
+- Rechecked the organization: Free plan, no Stripe subscription, one `shared-1x` / 512 MB service with scale-to-zero enabled.
+
+### Routine checks
+
 ```sh
 curl -fsS https://openvoice-b9f107db-78e0-4b30-b3ce-681932526b3b.fly.dev/api/health
 npx -y @insforge/cli compute get 288f6477-c196-4e89-bcd7-8e0c5431bc4e --json
