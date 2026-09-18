@@ -15,6 +15,7 @@
     "cors": "latest",
     "dotenv": "latest",
     "express": "latest",
+    "franc-min": "latest",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest"
