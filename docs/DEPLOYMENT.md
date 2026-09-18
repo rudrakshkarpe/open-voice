@@ -103,6 +103,14 @@ The queue/reconnect-grace changes address that failure path without raising the 
 
 Other cases remain distinct: clips longer than ten minutes, private/age/region restrictions, upstream YouTube throttling or bot checks, and speech-provider quotas. Downloader errors are categorized into actionable messages without exposing raw command output or cookies. The app does not bypass sign-in or bot checks. See the [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#http-error-429-too-many-requests-or-402-payment-required) for upstream download throttling.
 
+Import-recovery release references:
+
+- Backend source: `17a2b9f81ce1ae19275ca4de7ba431014eb67f2e`; image digest `sha256:1826067f6d50a25f83d428ad66dfe465be22f0b5d4f87a1ae116069e5b63b386` in the same registry repository as the initial release.
+- Website frontend pin: `3539e94143d0249c03902fd5cbe86dfb7cfaefea`. The later frontend-only commit fixes the browser receiver for the retry helper's `fetch`; Node mocks alone did not catch that behavior, so a receiver regression test was added.
+- [Pages release run](https://github.com/rudrakshkarpe/rudrakshkarpe.com/actions/runs/35403667494).
+- Local lint, production/subpath builds and all 46 tests passed, including queued-job cancellation, idle session reclamation, bounded busy retries, browser fetch binding and suppression of failed language-update retries.
+- Live verification: `HnGxcShWNv4` loaded through the website, detected English, produced captions and played its 58.93-second video with no media/browser errors. A three-import backend test showed two jobs `importing` and the third `queued` rather than rejected; the three temporary test jobs were then cancelled and removed. Pages release succeeded.
+
 ### Operational commands
 
 ```sh
