@@ -7,6 +7,7 @@
     "dev": "concurrently -k -n web,gateway -c magenta,cyan \"vite\" \"tsx watch server/index.ts\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "tsx --test server/*.test.ts",
     "preview": "vite preview",
     "start": "node dist-server/index.js"
   },
@@ -17,24 +18,28 @@
     "express": "latest",
     "franc-min": "latest",
     "lucide-react": "latest",
+    "multer": "^2.4.0",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@eslint/js": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
     "@types/cors": "latest",
     "@types/express": "latest",
+    "@types/multer": "^2.2.0",
     "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/ws": "^8.18.1",
     "concurrently": "latest",
     "eslint": "latest",
     "eslint-plugin-react-hooks": "latest",
     "eslint-plugin-react-refresh": "latest",
     "globals": "latest",
+    "tsx": "latest",
     "typescript": "latest",
     "typescript-eslint": "latest",
-    "tsx": "latest",
     "vite": "latest"
   }
 }

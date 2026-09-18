@@ -4,6 +4,7 @@ import cors from 'cors'
 import express from 'express'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { mediaRouter } from './media.js'
 
 config({ path: '.env.local', override: true })
 
@@ -14,6 +15,8 @@ const bosonBaseUrl = 'https://api.boson.ai/v1'
 
 app.use(cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'] }))
 app.use(express.json({ limit: '1mb' }))
+app.use('/api/media', mediaRouter)
+app.use('/api', (_request, response, next) => { response.set('Cache-Control', 'no-store'); next() })
 
 const bosonHeaders = () => ({
   Authorization: `Bearer ${bosonApiKey}`,
@@ -49,6 +52,11 @@ app.post('/api/boson/realtime-secret', async (_request, response) => {
 })
 
 const clientDirectory = path.resolve('dist')
+app.use('/api', (_request, response) => response.status(404).json({ error: 'API route not found.' }))
+app.use((error: Error, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  void _next // Express identifies an error handler by its four arguments.
+  response.status(400).json({ error: error.message.includes('File too large') ? 'Use a file smaller than 200 MB.' : 'Unable to process this upload.' })
+})
 if (existsSync(clientDirectory)) {
   app.use(express.static(clientDirectory))
   app.use((_request, response) => response.sendFile(path.join(clientDirectory, 'index.html')))
