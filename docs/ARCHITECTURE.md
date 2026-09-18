@@ -46,7 +46,11 @@ Each PCM section is padded, written completely, then published as an immutable W
 
 Current audio keeps playing while a new language prepares at the current position. Switching uses short gain ramps; an explicit mid-sentence switch can interrupt a word. If an active queue runs dry, video and audio stop together at that source boundary, show a buffering message and automatically resume after the short cushion returns. Audio is never silently skipped to a later available section. Pause, seek, video waiting, replacement and language changes cancel scheduled nodes. Epoch checks invalidate stale asynchronous play operations.
 
-“Recent switches” exposes language transitions. “Playback diagnostics” exposes buffered seconds, stream starts (not the number of scheduled section nodes), rebuffer events and clock drift. A new stream on pause/resume, seek or language change is expected.
+The normal player has one language selector and one set of playback controls; selecting a language is the only action needed to prepare and switch it. A concise status distinguishes non-blocking preparation, actual audio/video interruptions, errors and finished playback. Captions can be toggled off without interrupting the audio. There are no whole-track progress bars or additional translation play buttons.
+
+Opening the app with `?debug=1` before importing exposes developer diagnostics below the player: language transitions, buffered seconds, stream starts (not the number of scheduled section nodes), rebuffer events, clock drift, extracted audio and the source transcript. A new stream on pause/resume, seek or language change is expected. Diagnostics are hidden in the normal experience, not removed from the scheduler.
+
+The entry screen combines YouTube and file imports with the actual demo limits. Empty, oversized and unsupported files are rejected before replacing a working source. The rotating headline keeps a stable layout, is hidden from the accessibility tree in favor of a static English heading, has a pause control and stops for reduced-motion preferences. New video cancels the session, invalidates old request responses, stops scheduled audio and releases the local object URL. No provider API change is needed for this UX.
 
 ## API and operational limits
 
@@ -73,3 +77,5 @@ Progressive-playback checks on 2026-09-18 used the supplied 73-second sample:
 - Choosing uncached Chinese kept Italian playing; Chinese then became active while its cache was still incomplete (observed at 7/11). Playback reached the end with zero reported audio rebuffer events in that run.
 - Section duration headers, invalid playhead rejection and stale selection handling were checked against the running API. Existing YouTube importing and byte-range playback paths are unchanged.
 - These are integration/timing checks, not native-speaker quality evaluations. Progressive delivery is not sample-level model streaming: each short phrase still completes translation and synthesis before publication. Slow provider responses, concurrent jobs or network delays can still cause a short initial wait or later buffering.
+
+UX checks on the same date verified the new landing screen, headline rotation and pause control, and a 390-pixel layout with no horizontal document overflow. In the sample player, Original switched automatically to Italian without a second play action. Requesting Mandarin Chinese kept Italian playing while the new audio prepared. The caption toggle hid the overlay without pausing playback. The source remained uncropped in its native portrait ratio. The 32-test suite, lint and production build passed; the API rejected a non-YouTube import URL with HTTP 400.
