@@ -28,7 +28,7 @@ export function HiggsStudio() {
       const nextOutput = await generateSpeech({ text, voice, language, delivery })
       if (outputUrl) URL.revokeObjectURL(outputUrl)
       setOutputUrl(nextOutput)
-      window.setTimeout(() => audioRef.current?.play(), 0)
+      window.setTimeout(() => { void audioRef.current?.play().catch(() => undefined) }, 0)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Voice generation failed.')
     } finally {
@@ -67,11 +67,11 @@ export function HiggsStudio() {
         {loading ? 'Generating with Higgs…' : 'Generate voice preview'}
       </button>
 
-      <div className={`generated-player ${outputUrl ? 'visible' : ''}`}>
+      {outputUrl && <div className="generated-player visible">
         <button onClick={() => audioRef.current?.play()}><Play size={14} fill="currentColor" /></button>
         <div><strong>Higgs output ready</strong><small>{language ? language.toUpperCase() : 'AUTO'} · {bosonVoices.find((item) => item.id === voice)?.name}</small></div>
         <audio ref={audioRef} src={outputUrl} controls />
-      </div>
+      </div>}
 
       <p className="language-footnote"><Globe2 size={12} /> Auto-detect covers all 102 supported languages. Set a language for short or mixed-language scripts.</p>
     </div>
