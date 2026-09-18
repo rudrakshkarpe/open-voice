@@ -16,21 +16,29 @@ export default function App() {
   const [duration, setDuration] = useState(0)
   const [fileError, setFileError] = useState('')
   const [ratio, setRatio] = useState(16 / 9)
+  const [youtubeInput, setYoutubeInput] = useState('')
+  const [remote, setRemote] = useState(false)
   const session = useMediaSession()
   const player = useDubPlayer(session.job, targetCode)
-  const { videoRef, audioRef } = player
+  const { videoRef } = player
   const sourceRef = useRef('')
   const loadRevision = useRef(0)
-  const segment = session.job?.segments.find((item) => player.time >= item.start && player.time < item.end)
-  const dub = segment && session.job?.dubs[`${segment.index}-${targetCode}`]
-  const captionText = targetCode === 'original' ? segment?.text : dub?.state === 'ready' ? dub.text : ''
-  const cues = useMemo(() => captionCues(captionText ?? '', segment?.start ?? 0, segment?.end ?? 0), [captionText, segment?.start, segment?.end])
+  const mediaUrl = remote ? session.job?.videoUrl ?? '' : source.url
+  const mediaName = remote ? session.job?.name ?? 'YouTube video' : source.name
+  const hasSource = Boolean(source.url || remote)
+  const activeTrack = session.job?.tracks[player.activeLanguage]
+  const requestedTrack = session.job?.tracks[targetCode]
+  const segment = (player.activeLanguage === 'original' ? session.job?.segments : activeTrack?.segments)?.find((item) => player.time >= item.start && player.time < ('captionEnd' in item ? item.captionEnd : item.end))
+  const captionText = segment?.text
+  const captionEnd = segment && 'captionEnd' in segment ? segment.captionEnd : segment?.end
+  const cues = useMemo(() => captionCues(captionText ?? '', segment?.start ?? 0, captionEnd ?? 0), [captionText, segment?.start, captionEnd])
   const caption = captionAt(cues, player.time)
   const targetName = targetLanguages.find((language) => language.code === targetCode)?.name
+  const activeName = targetLanguages.find((language) => language.code === player.activeLanguage)?.name ?? 'Original'
   const completed = session.job?.segments.filter((item) => item.state === 'ready').length ?? 0
   const total = session.job?.segments.length ?? 0
   const error = fileError || player.error || session.error || session.job?.error
-  const preparing = session.uploading || session.job?.status === 'extracting' || session.job?.status === 'transcribing'
+  const preparing = session.uploading || ['importing', 'extracting', 'transcribing'].includes(session.job?.status ?? '')
 
   useEffect(() => () => { if (sourceRef.current.startsWith('blob:')) URL.revokeObjectURL(sourceRef.current) }, [])
 
@@ -38,11 +46,18 @@ export default function App() {
     if (!file) return
     if (file.size > 200 * 1024 * 1024) { setFileError('Use a file smaller than 200 MB.'); return }
     if (!/^(video|audio)\//.test(file.type) && !/\.(mp4|mov|webm|mp3|wav|m4a|ogg|flac)$/i.test(file.name)) { setFileError('Choose an audio or video file.'); return }
-    loadRevision.current++; player.reset(); previewRef.current?.pause(); setFileError(''); setTargetCode('original'); setDuration(0); setRatio(16 / 9)
+    loadRevision.current++; player.reset(); previewRef.current?.pause(); setFileError(''); setTargetCode('original'); setDuration(0); setRatio(16 / 9); setRemote(false)
     if (sourceRef.current.startsWith('blob:')) URL.revokeObjectURL(sourceRef.current)
     const url = URL.createObjectURL(file); sourceRef.current = url
     setSource({ url, name: file.name, audioOnly: file.type.startsWith('audio/') })
     await session.upload(file)
+  }
+  const loadYoutube = async () => {
+    if (!youtubeInput.trim()) return
+    loadRevision.current++; player.reset(); previewRef.current?.pause(); setFileError(''); setTargetCode('original'); setDuration(0); setRatio(16 / 9)
+    if (sourceRef.current.startsWith('blob:')) URL.revokeObjectURL(sourceRef.current)
+    sourceRef.current = ''; setSource({ url: '', name: '', audioOnly: false }); setRemote(true)
+    await session.importUrl(youtubeInput.trim())
   }
   const loadSample = async () => {
     const revision = ++loadRevision.current
@@ -57,43 +72,49 @@ export default function App() {
   return <div className="shell">
     <header>
       <a className="logo" href="/"><span><Languages size={18} /></span>openvoice</a>
-      <div className={`status ${player.playing ? 'live' : ''}`}><i />{player.playing ? player.state : preparing ? 'Preparing captions' : source.url ? 'Paused' : 'Ready'}</div>
+      <div className={`status ${player.playing ? 'live' : ''}`}><i />{player.playing ? `Playing ${activeName}` : preparing ? 'Preparing video' : hasSource ? 'Paused' : 'Ready'}</div>
     </header>
-    <main className={source.url ? 'has-source' : ''} onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
+    <main className={hasSource ? 'has-source' : ''} onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }}
       onDrop={(event) => { event.preventDefault(); setDragging(false); void loadFile(event.dataTransfer.files[0]) }}>
-      {!source.url ? <section className={`welcome ${dragging ? 'dragging' : ''}`}>
-        <div className="welcome-copy"><p>VIDEO TRANSLATION</p><h1>Every video,<br />in your language.</h1><span>Upload a clip. We identify the speech, prepare captions, and translate its voice as you watch.</span></div>
+      <form className="youtube-form" onSubmit={(event) => { event.preventDefault(); void loadYoutube() }}>
+        <label htmlFor="youtube-url">YouTube video</label><div><input id="youtube-url" type="url" placeholder="Paste a YouTube link…" value={youtubeInput} onChange={(event) => setYoutubeInput(event.target.value)} required /><button type="submit" disabled={session.uploading || !youtubeInput.trim()}>Load video</button></div>
+        <small>Public recorded clips · up to 10 minutes · only media you have permission to process</small>
+      </form>
+      {!hasSource ? <section className={`welcome ${dragging ? 'dragging' : ''}`}>
+        <div className="welcome-copy"><p>VIDEO TRANSLATION</p><h1>Every video,<br />in your language.</h1><span>Paste a YouTube link or upload a clip. Prepare a language once, then watch with continuous translated audio.</span></div>
         <button className="dropzone" onClick={() => fileRef.current?.click()}><span><Upload size={23} /></span><strong>{dragging ? 'Drop it here' : 'Upload a video'}</strong><small>Audio or video · up to 200 MB / 10 minutes</small></button>
         <button className="sample-button" onClick={() => void loadSample()}><Play size={12} fill="currentColor" /> Try the sample video</button>
       </section> : <div className="workspace">
         <section className="player-column">
-          <div className="source-bar"><div><Video size={14} /><span>{source.name}</span></div><button onClick={() => fileRef.current?.click()}><Upload size={13} /> Replace</button></div>
+          <div className="source-bar"><div><Video size={14} /><span>{mediaName}</span></div><button onClick={() => fileRef.current?.click()}><Upload size={13} /> Replace</button></div>
           <div className="video-frame" style={{ aspectRatio: String(source.audioOnly ? 16 / 9 : ratio), maxWidth: `${(source.audioOnly ? 16 / 9 : ratio) * 65}vh` }}>
-            <video ref={videoRef} src={source.url} playsInline preload="auto" onLoadedMetadata={(event) => {
+            <video ref={videoRef} src={mediaUrl || undefined} playsInline preload="auto" onWaiting={player.buffering} onLoadedMetadata={(event) => {
               const media = event.currentTarget; setDuration(Number.isFinite(media.duration) ? media.duration : 0)
               if (media.videoWidth && media.videoHeight) setRatio(media.videoWidth / media.videoHeight)
             }} onError={() => { player.pause(); setFileError('This browser cannot play this file. Try an H.264 MP4 or WebM.') }} />
             {source.audioOnly && <div className="audio-placeholder"><Headphones size={42} /><span>{source.name}</span></div>}
+            {!mediaUrl && <div className="import-placeholder"><Video size={28} /><p>{session.job?.error ? 'Video import failed' : session.job?.message ?? 'Loading video…'}</p></div>}
             {caption && <div className="captions"><strong>{caption}</strong></div>}
-            {!player.playing && <button className="play" aria-label="Play video" onClick={() => { previewRef.current?.pause(); player.toggle() }}><Play size={26} fill="currentColor" /></button>}
+            {mediaUrl && !player.playing && <button className="play" aria-label="Play video" onClick={() => { previewRef.current?.pause(); player.toggle() }}><Play size={26} fill="currentColor" /></button>}
           </div>
-          <audio ref={audioRef} preload="auto" onError={() => { player.pause(); setFileError('Translated audio could not be loaded. Select the original audio or retry.') }} />
           <div className="controls">
             <button aria-label="Restart video" onClick={() => player.seek(0)}><RotateCcw size={16} /></button>
-            <button className="primary-control" aria-label={player.playing ? 'Pause video' : 'Play video'} onClick={() => { previewRef.current?.pause(); player.toggle() }}>{player.playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+            <button className="primary-control" disabled={!mediaUrl} aria-label={player.playing ? 'Pause video' : 'Play video'} onClick={() => { previewRef.current?.pause(); player.toggle() }}>{player.playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
             <input aria-label="Video position" type="range" min={0} max={duration || 1} step={0.05} value={player.time} onChange={(event) => player.seek(Number(event.target.value))} />
             <span>{clock(player.time)} / {clock(duration)}</span>
           </div>
-          <p className="playback-note" role="status">{player.playing ? player.state : 'Ready to play'}{targetCode !== 'original' ? ' · Translation buffers a short section ahead.' : ''}</p>
+          <p className="playback-note" role="status">{player.state}</p>
         </section>
         <aside>
           <div className="aside-head"><p>LANGUAGE</p><span>{preparing ? `${completed}/${total || '…'} sections` : session.job?.status === 'ready' ? 'Captions prepared' : ''}</span></div>
           <section className="detected"><small>SOURCE LANGUAGE</small><div><span>{session.job?.language ?? (preparing ? 'Identifying speech…' : 'Not yet identified')}</span></div><p>{session.job?.language ? 'Estimated from the transcribed speech.' : 'Waiting for enough clear speech to identify the language.'}</p></section>
-          <label className="language-select"><small>TRANSLATE TO</small><div><Languages size={18} /><select aria-describedby="translation-help" value={targetCode} onChange={(event) => { previewRef.current?.pause(); setTargetCode(event.target.value) }}><option value="original">Original · no translation</option>{targetLanguages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></div></label>
-          <p className="translation-help" id="translation-help">Choose a language to change both the voice and captions. Switch languages at any point.</p>
-          {targetName && <button className="translate-button" onClick={() => { previewRef.current?.pause(); player.play() }} disabled={player.playing}><Volume2 size={16} /><span>{player.playing ? `${targetName} audio selected` : `Translate & play in ${targetName}`}</span></button>}
-          <section className="output-card"><small>{targetCode === 'original' ? 'SOURCE CAPTION' : 'TRANSLATED CAPTION'}</small><p>{caption || (!player.playing ? 'Press play. Captions appear as the video progresses.' : preparing && !segment?.text ? 'Preparing captions for this section…' : targetName && dub?.state !== 'ready' ? player.state : 'Listening…')}</p><div className={player.playing ? 'active' : ''}><i /><span>{player.playing ? player.state : 'Paused'}</span></div></section>
+          <label className="language-select"><small>TRANSLATE TO</small><div><Languages size={18} /><select aria-describedby="translation-help" value={targetCode} onChange={(event) => { previewRef.current?.pause(); setTargetCode(event.target.value) }}><option value="original">Original · no translation</option>{targetLanguages.map((language) => <option key={language.code} value={language.code}>{language.name}{session.job?.tracks[language.code]?.state === 'ready' ? ' · Ready' : ''}</option>)}</select><ChevronDown size={15} /></div></label>
+          <p className="translation-help" id="translation-help">Prepare once for continuous playback. Your current audio keeps playing while another language gets ready. Longer translated phrases slow the video to match the voice.</p>
+          {targetName && <section className="track-progress" aria-live="polite"><strong>{player.translationError ? `${targetName} needs a retry` : requestedTrack?.state === 'ready' ? `${targetName} ready` : `Preparing ${targetName}`}</strong><span>{requestedTrack?.message ?? 'Waiting for source captions'}</span><progress value={requestedTrack?.completed ?? 0} max={requestedTrack?.total || 1} />{player.translationError && <p className="error">{player.translationError}</p>}<button className="translate-button" onClick={() => { previewRef.current?.pause(); if (player.translationError) player.retry(); else player.play() }} disabled={!mediaUrl || (player.playing && !player.translationError)}><Volume2 size={16} /><span>{player.translationError ? 'Retry preparation' : requestedTrack?.state === 'ready' ? `Play in ${targetName}` : player.playing ? `Playing ${activeName} while preparing` : 'Play current audio while preparing'}</span></button></section>}
+          <section className="output-card"><small>{activeName.toUpperCase()} CAPTIONS</small><p>{caption || (!player.playing ? 'Press play. Captions follow the active audio.' : preparing ? 'Preparing source captions…' : 'Listening…')}</p><div className={player.playing ? 'active' : ''}><i /><span>{player.playing ? `Playing ${activeName}` : 'Paused'}</span></div></section>
+          {player.activity.length > 0 && <details className="audio-check"><summary>Recent switches</summary>{player.activity.map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}</details>}
+          {player.audioStarts > 0 && <details className="audio-check"><summary>Playback diagnostics</summary><p>Continuous audio · {player.audioStarts} starts since upload · sync drift {player.drift} ms</p><small>Audio runs at a steady 1×. Pausing, seeking and switching start a new playback instance.</small></details>}
           {session.job?.extractedAudioUrl && <details className="audio-check"><summary>Check extracted audio</summary><p>Listen to the exact track used for transcription.</p><audio ref={previewRef} src={session.job.extractedAudioUrl} controls onPlay={player.pause} /><small>24 kHz mono · {session.job.rmsDb?.toFixed(1)} dBFS RMS</small></details>}
           {session.job?.segments.length ? <details className="transcript-check"><summary>Source transcript ({completed}/{total})</summary><div>{session.job.segments.map((item) => <button key={item.index} onClick={() => player.seek(item.start)}><small>{clock(item.start)}</small><span>{item.text || item.error || (item.state === 'ready' ? 'No speech' : 'Transcribing…')}</span></button>)}</div></details> : null}
         </aside>

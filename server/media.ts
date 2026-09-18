@@ -7,8 +7,11 @@ import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { detectLanguage } from './language.js'
-import { SAMPLE_RATE, segmentAudio, signalStats } from './audio.js'
+import { SAMPLE_RATE, BYTES_PER_SECOND, segmentAudio, signalStats } from './audio.js'
 import { transcribe, translate, synthesize } from './boson.js'
+import { importYoutube, youtubeUrl } from './youtube.js'
+import { assemblePcm, decodeSpeech, durationGuide, fitSpeech, MAX_TEMPO, speechWindow, translationUnits, wav } from './tracks.js'
+import type { Track, Unit } from './tracks.js'
 
 const run = promisify(execFile)
 const root = await mkdtemp(path.join(tmpdir(), 'openvoice-'))
@@ -16,23 +19,23 @@ const upload = multer({ dest: root, limits: { fileSize: 200 * 1024 * 1024, files
 const languages: Record<string, string> = { en: 'English', es: 'Spanish', hi: 'Hindi', fr: 'French', de: 'German', pt: 'Portuguese', ja: 'Japanese', ko: 'Korean', zh: 'Mandarin Chinese', ar: 'Arabic', it: 'Italian', ru: 'Russian', ta: 'Tamil', te: 'Telugu', mr: 'Marathi', bn: 'Bengali', gu: 'Gujarati', ur: 'Urdu', tr: 'Turkish', vi: 'Vietnamese', id: 'Indonesian', nl: 'Dutch', pl: 'Polish', uk: 'Ukrainian', sv: 'Swedish', th: 'Thai' }
 
 type Segment = { index: number; start: number; end: number; rmsDb: number; state: 'pending' | 'ready' | 'error'; text: string; error?: string }
-type Dub = { state: 'translating' | 'synthesizing' | 'ready' | 'error'; text: string; audioUrl?: string; error?: string }
 type Job = {
   id: string; directory: string; createdAt: number; controller: AbortController;
-  status: 'extracting' | 'transcribing' | 'ready' | 'error'; error?: string;
+  status: 'importing' | 'extracting' | 'transcribing' | 'ready' | 'error'; error?: string; message?: string; videoUrl?: string;
   name: string; duration: number; width: number; height: number; sampleRate: number;
   rmsDb?: number; peakDb?: number; language: string | null; segments: Segment[];
-  dubs: Record<string, Dub>; listeners: Set<(data: string) => void>;
+  tracks: Record<string, Track>; requestedLanguage: string; selection: number; units: Unit[]; parts: Record<string, { start: number; end: number; pcm: Buffer }[]>; listeners: Set<(data: string) => void>;
 }
 const jobs = new Map<string, Job>()
 const view = (job: Job) => ({ id: job.id, name: job.name, status: job.status, error: job.error, duration: job.duration, width: job.width, height: job.height,
-  sampleRate: job.sampleRate, rmsDb: job.rmsDb, peakDb: job.peakDb, language: job.language, segments: job.segments, dubs: job.dubs,
+  sampleRate: job.sampleRate, rmsDb: job.rmsDb, peakDb: job.peakDb, language: job.language, segments: job.segments, tracks: job.tracks, videoUrl: job.videoUrl, message: job.message,
   extractedAudioUrl: job.status !== 'extracting' && job.rmsDb !== undefined ? `/api/media/${job.id}/source.wav` : undefined })
 const publish = (job: Job) => { const data = JSON.stringify(view(job)); for (const listener of job.listeners) listener(data) }
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Processing failed.'
 
-async function processMedia(job: Job, file: string) {
+async function processMedia(job: Job, file: string, keepVideo = false) {
   try {
+    job.status = 'extracting'; publish(job)
     const { stdout } = await run('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file], { signal: job.controller.signal, timeout: 20000, maxBuffer: 1024 * 1024 })
     const info = JSON.parse(stdout)
     const audio = info.streams.find((stream: { codec_type: string }) => stream.codec_type === 'audio')
@@ -44,6 +47,7 @@ async function processMedia(job: Job, file: string) {
     const pcmFile = path.join(job.directory, 'source.pcm')
     await run('ffmpeg', ['-v', 'error', '-nostdin', '-i', file, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', String(SAMPLE_RATE), '-f', 's16le', pcmFile], { signal: job.controller.signal, timeout: 120000 })
     const pcm = await readFile(pcmFile)
+    job.duration = Math.max(job.duration, pcm.length / BYTES_PER_SECOND)
     Object.assign(job, signalStats(pcm))
     if (!pcm.length || (job.peakDb ?? -180) < -60) throw new Error('The extracted track is silent. Choose a clip with audible speech.')
     await run('ffmpeg', ['-v', 'error', '-nostdin', '-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '1', '-i', pcmFile, path.join(job.directory, 'source.wav')], { signal: job.controller.signal, timeout: 30000 })
@@ -61,35 +65,117 @@ async function processMedia(job: Job, file: string) {
     }
     job.status = job.segments.every((segment) => segment.state === 'error') ? 'error' : 'ready'
     if (job.status === 'error') job.error = job.segments[0]?.error ?? 'Transcription failed.'
+    job.units = translationUnits(job.segments)
+    for (const track of Object.values(job.tracks)) track.total = job.units.length
     publish(job)
+    schedule(job)
   } catch (error) {
     if (!job.controller.signal.aborted) { job.status = 'error'; job.error = errorText(error); publish(job) }
-  } finally { await rm(file, { force: true }) }
+  } finally { if (!keepVideo) await rm(file, { force: true }) }
 }
 
-// Bound provider concurrency, including prefetches; never fan out on every frame.
-let activeDubs = 0
-const queue: (() => Promise<void>)[] = []
+// One provider request at a time avoids rate-limit storms. Re-select the desired
+// language after every section, so abandoned choices cannot build a long queue.
+let active = false
+const queue: Job[] = []
+function schedule(job: Job) {
+  if (!queue.includes(job)) queue.push(job)
+  drain()
+}
 function drain() {
-  while (activeDubs < 1 && queue.length) {
-    activeDubs++
-    void queue.shift()!().finally(() => { activeDubs--; drain() })
+  if (active) return
+  const job = queue.shift()
+  if (!job) return
+  const language = job.requestedLanguage; const track = job.tracks[language]
+  if (job.controller.signal.aborted || job.status !== 'ready' || !track || ['ready', 'error'].includes(track.state)) { drain(); return }
+  active = true
+  void prepareStep(job, language, track).finally(() => { active = false; schedule(job) })
+}
+
+async function prepareStep(job: Job, language: string, track: Track) {
+  const signal = job.controller.signal
+  try {
+    if (job.segments.some((segment) => segment.state === 'error')) throw new Error('Some source speech could not be transcribed. Re-upload before translating.')
+    track.state = 'preparing'; track.total = job.units.length
+    const index = track.completed; const unit = job.units[index]
+    if (unit) {
+      track.message = `Translating ${index + 1}/${track.total}`; publish(job)
+      let pcm: Buffer = Buffer.alloc(0); let text = ''; let speed = 1
+      const seconds = unit.end - unit.start
+      let window = seconds
+      if (unit.text.trim()) {
+        const context = JSON.stringify({ before: job.units[index - 1]?.text ?? '', after: job.units[index + 1]?.text ?? '' })
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const guide = durationGuide(seconds, attempt ? { text, seconds: pcm.length / BYTES_PER_SECOND } : undefined)
+          track.message = `${attempt ? 'Refining timing' : 'Translating'} ${index + 1}/${track.total}`; publish(job)
+          text = await translate(unit.text, languages[language], signal, () => {}, `${guide} Neighbouring text is context only, not to be translated: ${context}`)
+          track.message = `Generating voice ${index + 1}/${track.total}`; publish(job)
+          pcm = await decodeSpeech(job.directory, `${language}-${index}`, await synthesize(text, signal), signal)
+          if (!pcm.length) throw new Error('The speech provider returned silent audio. Retry this language.')
+          if (pcm.length / BYTES_PER_SECOND <= seconds * (MAX_TEMPO - 0.03)) break
+        }
+        if (pcm.length / BYTES_PER_SECOND > seconds * 3) throw new Error('The provider returned unexpectedly long speech. Retry this language.')
+        window = speechWindow(pcm.length / BYTES_PER_SECOND, seconds)
+        const fitted = await fitSpeech(job.directory, `${language}-${index}`, pcm, window, signal)
+        pcm = fitted.pcm; speed = fitted.speed
+      }
+      const audioStart = track.segments.at(-1)?.audioEnd ?? unit.start
+      const audioEnd = audioStart + window
+      job.parts[language].push({ start: audioStart, end: audioEnd, pcm })
+      track.segments.push({ ...unit, text, audioStart, audioEnd, captionEnd: Math.min(unit.end, unit.start + pcm.length / BYTES_PER_SECOND / window * seconds) })
+      if (window > seconds + 0.01) track.slowedSections = (track.slowedSections ?? 0) + 1
+      track.maxSpeed = Math.max(track.maxSpeed ?? 1, speed)
+      track.completed++
+    }
+    if (track.completed === track.total) {
+      track.message = 'Assembling continuous audio'; publish(job)
+      const last = track.segments.at(-1)
+      track.duration = (last?.audioEnd ?? 0) + Math.max(0, job.duration - (last?.end ?? 0))
+      await writeFile(path.join(job.directory, `track-${language}.wav`), wav(assemblePcm(job.parts[language], track.duration)))
+      job.parts[language] = []
+      track.state = 'ready'; track.message = track.slowedSections ? `Ready · ${track.slowedSections} voice-paced sections` : 'Ready to play'; track.audioUrl = `/api/media/${job.id}/audio/track-${language}.wav`
+    } else if (job.requestedLanguage !== language) { track.state = 'paused'; track.message = 'Saved progress · select to resume' }
+    publish(job)
+  } catch (error) {
+    if (!signal.aborted) { track.state = 'error'; track.error = errorText(error); track.message = 'Preparation failed'; publish(job) }
   }
 }
+
+async function createJob(name: string, status: Job['status']) {
+  const id = randomUUID(); const directory = path.join(root, id)
+  await mkdir(directory)
+  const job: Job = { id, directory, createdAt: Date.now(), controller: new AbortController(), status, name,
+    duration: 0, width: 0, height: 0, sampleRate: SAMPLE_RATE, language: null, segments: [], tracks: {}, requestedLanguage: 'original', selection: 0, units: [], parts: {}, listeners: new Set() }
+  jobs.set(id, job)
+  return job
+}
+const busy = () => [...jobs.values()].filter((job) => ['importing', 'extracting', 'transcribing'].includes(job.status)).length >= 2
 
 export const mediaRouter = Router()
 mediaRouter.post('/', upload.single('file'), async (request, response) => {
   if (!request.file) return response.status(400).json({ error: 'Choose an audio or video file.' })
-  if ([...jobs.values()].filter((j) => j.status === 'extracting' || j.status === 'transcribing').length >= 2) {
+  if (busy()) {
     await rm(request.file.path, { force: true }); return response.status(429).json({ error: 'Two files are already processing. Please wait.' })
   }
-  const id = randomUUID(); const directory = path.join(root, id)
-  await mkdir(directory)
-  const job: Job = { id, directory, createdAt: Date.now(), controller: new AbortController(), status: 'extracting', name: request.file.originalname,
-    duration: 0, width: 0, height: 0, sampleRate: SAMPLE_RATE, language: null, segments: [], dubs: {}, listeners: new Set() }
-  jobs.set(id, job)
+  const job = await createJob(request.file.originalname, 'extracting')
   response.status(202).json(view(job))
   void processMedia(job, request.file.path)
+})
+mediaRouter.post('/youtube', async (request, response) => {
+  let url: string
+  try { url = youtubeUrl(request.body?.url) } catch (error) { return response.status(400).json({ error: errorText(error) }) }
+  if (busy()) return response.status(429).json({ error: 'Two videos are already processing. Please wait.' })
+  const job = await createJob('YouTube video', 'importing')
+  response.status(202).json(view(job))
+  void (async () => {
+    try {
+      const file = await importYoutube(url, job.directory, job.controller.signal, (message, title) => { job.message = message; if (title) job.name = title; publish(job) })
+      job.videoUrl = `/api/media/${job.id}/video`; job.message = 'Preparing captions…'
+      await processMedia(job, file, true)
+    } catch (error) {
+      if (!job.controller.signal.aborted) { job.status = 'error'; job.error = errorText(error); publish(job) }
+    }
+  })()
 })
 mediaRouter.get('/:id', (request, response) => { const job = jobs.get(request.params.id); return job ? response.json(view(job)) : response.status(404).json({ error: 'Media session expired. Upload it again.' }) })
 mediaRouter.get('/:id/events', (request, response) => {
@@ -106,35 +192,31 @@ mediaRouter.get('/:id/source.wav', (request, response) => {
   if (!job) return response.sendStatus(404)
   response.set('Cache-Control', 'no-store').sendFile(path.join(job.directory, 'source.wav'))
 })
-mediaRouter.post('/:id/translate', (request, response) => {
+mediaRouter.get('/:id/video', (request, response) => {
   const job = jobs.get(request.params.id)
-  const { index, language } = request.body
+  if (!job?.videoUrl) return response.sendStatus(404)
+  response.set('Cache-Control', 'private, max-age=3600').sendFile(path.join(job.directory, 'video.mp4'))
+})
+mediaRouter.post('/:id/tracks', (request, response) => {
+  const job = jobs.get(request.params.id)
+  const { language, retry, selection } = request.body ?? {}
   if (!job) return response.sendStatus(404)
-  if (!Number.isInteger(index) || typeof language !== 'string' || !languages[language]) return response.status(400).json({ error: 'Invalid segment or language.' })
-  const segment = job.segments[index]
-  if (!segment || segment.state !== 'ready') return response.status(409).json({ error: segment?.error ?? 'Source transcript is still processing.' })
-  const key = `${index}-${language}`
-  if (job.dubs[key] && job.dubs[key].state !== 'error') return response.json(job.dubs[key])
-  const dub: Dub = { state: 'translating', text: '' }; job.dubs[key] = dub
-  response.status(202).json(dub); publish(job)
-  queue.push(async () => {
-    if (job.controller.signal.aborted) return
-    try {
-      if (segment.text.trim()) {
-        dub.text = await translate(segment.text, languages[language], job.controller.signal, (text) => { dub.text = text; publish(job) })
-        dub.state = 'synthesizing'; publish(job)
-        const audio = await synthesize(dub.text, job.controller.signal)
-        await writeFile(path.join(job.directory, `${key}.mp3`), audio)
-        dub.audioUrl = `/api/media/${job.id}/audio/${key}.mp3`
-      }
-      dub.state = 'ready'
-    } catch (error) { dub.state = 'error'; dub.error = errorText(error) }
-    publish(job)
-  }); drain()
+  if (typeof language !== 'string' || (language !== 'original' && !languages[language])) return response.status(400).json({ error: 'Invalid language.' })
+  if (!Number.isSafeInteger(selection) || selection < 0) return response.status(400).json({ error: 'Invalid selection revision.' })
+  if (selection < job.selection) return response.status(202).json({ state: 'superseded' })
+  job.selection = selection
+  job.requestedLanguage = language
+  for (const [key, track] of Object.entries(job.tracks)) if (key !== language && track.state === 'queued') { track.state = 'paused'; track.message = 'Saved progress · select to resume' }
+  if (language !== 'original') {
+    if (!job.tracks[language]) { job.tracks[language] = { state: 'queued', completed: 0, total: job.units.length, message: 'Waiting for source captions', segments: [] }; job.parts[language] = [] }
+    const track = job.tracks[language]
+    if (track.state === 'paused' || (retry && track.state === 'error')) { track.state = 'queued'; delete track.error; track.message = 'Queued for preparation' }
+  }
+  response.status(202).json(job.tracks[language] ?? { state: 'ready' }); publish(job); schedule(job)
 })
 mediaRouter.get('/:id/audio/:file', (request, response) => {
   const job = jobs.get(request.params.id)
-  if (!job || !/^\d+-[a-z]{2}\.mp3$/.test(request.params.file)) return response.sendStatus(404)
+  if (!job || !/^track-[a-z]{2}\.wav$/.test(request.params.file)) return response.sendStatus(404)
   response.set('Cache-Control', 'private, max-age=3600').sendFile(path.join(job.directory, request.params.file))
 })
 async function removeJob(job: Job) {

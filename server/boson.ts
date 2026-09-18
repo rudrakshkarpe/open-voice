@@ -3,7 +3,7 @@ import WebSocket from 'ws'
 type Event = { type: string; transcript?: string; delta?: string; text?: string; error?: { message?: string }; response?: { status?: string } }
 
 // Resolve only from actual provider output, with bounded lifetime and abort cleanup.
-function realtime(kind: 'transcribe' | 'translate', input: Buffer | string, signal: AbortSignal, language?: string, onDelta?: (text: string) => void): Promise<string> {
+function realtime(kind: 'transcribe' | 'translate', input: Buffer | string, signal: AbortSignal, language?: string, onDelta?: (text: string) => void, guide = ''): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!process.env.BOSON_API_KEY) return reject(new Error('Configure BOSON_API_KEY on the server.'))
     if (signal.aborted) return reject(new Error('Cancelled'))
@@ -46,7 +46,7 @@ function realtime(kind: 'transcribe' | 'translate', input: Buffer | string, sign
             send({ type: 'input_audio_buffer.commit' })
           } else {
             send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{
-              type: 'input_text', text: `Translate the following source text into ${language}. Return only the translated words.\n<source>${input}</source>`,
+              type: 'input_text', text: `Translate the source text into natural spoken ${language}. Preserve the meaning, names and facts. Use fluent conversational wording, not a word-for-word translation. Never add commentary, sound tags or filler words. Return only the translated source, not the context. ${guide}\n<source>${input}</source>`,
             }] } })
             send({ type: 'response.create' })
           }
@@ -66,7 +66,7 @@ function realtime(kind: 'transcribe' | 'translate', input: Buffer | string, sign
 }
 
 export const transcribe = (pcm: Buffer, signal: AbortSignal) => realtime('transcribe', pcm, signal)
-export const translate = (text: string, language: string, signal: AbortSignal, onDelta: (text: string) => void) => realtime('translate', text, signal, language, onDelta)
+export const translate = (text: string, language: string, signal: AbortSignal, onDelta: (text: string) => void, guide = '') => realtime('translate', text, signal, language, onDelta, guide)
 
 export async function synthesize(text: string, signal: AbortSignal) {
   for (let attempt = 0; attempt < 5; attempt++) {
