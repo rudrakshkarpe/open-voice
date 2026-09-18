@@ -35,12 +35,14 @@ main.has-source { display: block; padding-top: 34px; }
 .source-bar div { display: flex; align-items: center; gap: 8px; min-width: 0; color: #a7a7ac; font-size: 10px; }
 .source-bar div span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .source-bar button { display: flex; align-items: center; gap: 6px; border: 0; color: #77777d; background: transparent; font-size: 9px; cursor: pointer; }
-.video-frame { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; display: grid; place-items: center; border-radius: 10px; background: #050506; }
-.video-frame video { width: 100%; height: 100%; object-fit: contain; }
+.video-frame { position: relative; width: 100%; margin: 0 auto; overflow: hidden; display: grid; place-items: center; border-radius: 10px; background: #050506; }
+.video-frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.audio-placeholder { display: grid; place-items: center; gap: 18px; color: #a8ff78; }
+.audio-placeholder span { color: #aaa; font-size: 12px; max-width: 200px; overflow-wrap: anywhere; }
 .play { position: absolute; display: grid; place-items: center; width: 58px; height: 58px; padding-left: 4px; border: 0; border-radius: 50%; color: #0b0b0c; background: #a8ff78; cursor: pointer; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
 .play:disabled { padding: 0; }
 .captions { position: absolute; left: 7%; right: 7%; bottom: 7%; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; pointer-events: none; }
-.captions strong { max-width: 760px; padding: 6px 10px; border-radius: 6px; color: white; background: rgba(0,0,0,.8); font: 600 clamp(14px, 1.5vw, 22px)/1.35 'Space Grotesk'; }
+.captions strong { max-width: 760px; padding: 6px 10px; border-radius: 6px; color: white; background: rgba(0,0,0,.8); font: 500 13px/1.4 'DM Sans', sans-serif; }
 .captions small { max-width: 660px; padding: 4px 7px; border-radius: 4px; color: #c8c8cb; background: rgba(0,0,0,.66); font-size: 10px; }
 .controls { height: 52px; display: grid; grid-template-columns: 30px 34px 1fr 105px; align-items: center; gap: 8px; padding: 7px 3px 0; }
 .controls button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; color: #77777c; background: transparent; cursor: pointer; }
@@ -49,6 +51,15 @@ main.has-source { display: block; padding-top: 34px; }
 .control-line span { display: block; width: 0; height: 100%; background: #a8ff78; }
 .control-line span.moving { width: 100%; animation: listen 2s ease-in-out infinite; }
 .controls > span { color: #727278; font-size: 9px; text-align: right; }
+.controls input { min-width: 0; width: 100%; accent-color: #a8ff78; cursor: pointer; }
+.playback-note { color: #929299; font-size: 11px; margin: 10px 4px 4px; }
+.audio-check, .transcript-check { margin-top: 20px; border-top: 1px solid #252529; padding-top: 15px; color: #a7a7ad; font-size: 11px; }
+summary { cursor: pointer; }
+.audio-check p { font-size: 11px; line-height: 1.5; }
+.audio-check audio { width: 100%; height: 34px; margin-bottom: 10px; }
+.transcript-check > div { max-height: 240px; overflow: auto; margin-top: 10px; }
+.transcript-check button { display: flex; gap: 10px; width: 100%; padding: 10px 0; border: 0; border-bottom: 1px solid #252529; background: none; text-align: left; font-size: 11px; line-height: 1.5; cursor: pointer; }
+.transcript-check button small { color: #a8ff78; }
 .error { margin: 3px 5px 0; color: #ff7f8d; font-size: 10px; }
 
 aside { min-height: 520px; padding: 23px; }
@@ -62,7 +73,7 @@ aside { min-height: 520px; padding: 23px; }
 .detected p { max-height: 42px; overflow: hidden; margin: 8px 0 0; color: #74747a; font-size: 10px; line-height: 1.45; }
 .flow-arrow { display: flex; align-items: center; gap: 8px; margin: 20px 0; color: #515156; }
 .flow-arrow span { height: 1px; flex: 1; background: #29292d; }
-.language-select { display: block; }
+.language-select { display: block; margin-top: 25px; }
 .language-select > div { height: 48px; display: grid; grid-template-columns: 28px 1fr 18px; align-items: center; gap: 5px; padding: 0 10px; border: 1px solid #333337; border-radius: 10px; color: #a8ff78; background: #151518; }
 .language-select select { width: 100%; appearance: none; border: 0; outline: 0; color: #f3f3f0; background: transparent; font: 500 13px 'Space Grotesk'; cursor: pointer; }
 .language-select option { color: white; background: #151518; }

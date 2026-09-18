@@ -1,148 +1,99 @@
-import { useRef, useState } from 'react'
-import { ArrowRight, Check, ChevronDown, Languages, LoaderCircle, Pause, Play, RotateCcw, Sparkles, Upload, Video } from 'lucide-react'
-import { useRealtimeInterpreter } from './hooks/useRealtimeInterpreter'
+import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, Languages, Pause, Play, RotateCcw, Upload, Video, Headphones } from 'lucide-react'
+import { useMediaSession } from './hooks/useMediaSession'
+import { useDubPlayer } from './hooks/useDubPlayer'
 import { targetLanguages } from './lib/languages'
 
+const clock = (time: number) => `${Math.floor(time / 60)}:${Math.floor(time % 60).toString().padStart(2, '0')}`
+
 export default function App() {
-  const videoRef = useRef<HTMLVideoElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const [sourceUrl, setSourceUrl] = useState('')
-  const [sourceName, setSourceName] = useState('')
-  const [targetCode, setTargetCode] = useState('es')
-  const [playing, setPlaying] = useState(false)
+  const previewRef = useRef<HTMLAudioElement>(null)
+  const [source, setSource] = useState({ url: '', name: '', audioOnly: false })
+  const [targetCode, setTargetCode] = useState('original')
   const [dragging, setDragging] = useState(false)
-  const target = targetLanguages.find((language) => language.code === targetCode) ?? targetLanguages[0]
-  const interpreter = useRealtimeInterpreter(target.name)
+  const [duration, setDuration] = useState(0)
+  const [fileError, setFileError] = useState('')
+  const [ratio, setRatio] = useState(16 / 9)
+  const session = useMediaSession()
+  const player = useDubPlayer(session.job, targetCode)
+  const { videoRef, audioRef } = player
+  const sourceRef = useRef('')
+  const loadRevision = useRef(0)
+  const segment = session.job?.segments.find((item) => player.time >= item.start && player.time < item.end)
+  const dub = segment && session.job?.dubs[`${segment.index}-${targetCode}`]
+  const caption = targetCode === 'original' ? segment?.text : dub?.state === 'ready' ? dub.text : ''
+  const completed = session.job?.segments.filter((item) => item.state === 'ready').length ?? 0
+  const total = session.job?.segments.length ?? 0
+  const error = fileError || player.error || session.error || session.job?.error
+  const preparing = session.uploading || session.job?.status === 'extracting' || session.job?.status === 'transcribing'
+
+  useEffect(() => () => { if (sourceRef.current.startsWith('blob:')) URL.revokeObjectURL(sourceRef.current) }, [])
 
   const loadFile = async (file?: File) => {
-    if (!file || (!file.type.startsWith('video/') && !file.type.startsWith('audio/'))) return
-    await interpreter.stop()
-    if (sourceUrl.startsWith('blob:')) URL.revokeObjectURL(sourceUrl)
-    setSourceUrl(URL.createObjectURL(file))
-    setSourceName(file.name)
-    setPlaying(false)
+    if (!file) return
+    if (file.size > 200 * 1024 * 1024) { setFileError('Use a file smaller than 200 MB.'); return }
+    if (!/^(video|audio)\//.test(file.type) && !/\.(mp4|mov|webm|mp3|wav|m4a|ogg|flac)$/i.test(file.name)) { setFileError('Choose an audio or video file.'); return }
+    loadRevision.current++; player.reset(); previewRef.current?.pause(); setFileError(''); setTargetCode('original'); setDuration(0); setRatio(16 / 9)
+    if (sourceRef.current.startsWith('blob:')) URL.revokeObjectURL(sourceRef.current)
+    const url = URL.createObjectURL(file); sourceRef.current = url
+    setSource({ url, name: file.name, audioOnly: file.type.startsWith('audio/') })
+    await session.upload(file)
   }
-
   const loadSample = async () => {
-    await interpreter.stop()
-    setSourceUrl('/media/demo-source.mp4')
-    setSourceName('youtube-demo.mp4')
-    setPlaying(false)
+    const revision = ++loadRevision.current
+    try {
+      const response = await fetch('/media/demo-source.mp4')
+      if (!response.ok) throw new Error('Sample could not be loaded.')
+      const blob = await response.blob()
+      if (revision === loadRevision.current) await loadFile(new File([blob], 'youtube-demo.mp4', { type: 'video/mp4' }))
+    } catch { setFileError('Sample could not be loaded.') }
   }
 
-  const togglePlayback = async () => {
-    const video = videoRef.current
-    if (!video) return
-    if (!video.paused) {
-      video.pause()
-      return
-    }
-    if (interpreter.status === 'idle' || interpreter.status === 'error') await interpreter.start(video)
-    await video.play()
-  }
-
-  const reset = async () => {
-    const video = videoRef.current
-    if (video) {
-      video.pause()
-      video.currentTime = 0
-      video.volume = 1
-    }
-    await interpreter.stop()
-    setPlaying(false)
-  }
-
-  const changeLanguage = (code: string) => {
-    const next = targetLanguages.find((language) => language.code === code)
-    if (!next) return
-    setTargetCode(code)
-    interpreter.changeTarget(next.name)
-  }
-
-  const working = interpreter.status === 'connecting'
-  const live = interpreter.status === 'listening' || interpreter.status === 'speaking'
-
-  return (
-    <div className="shell">
-      <header>
-        <a className="logo" href="/"><span><Languages size={18} /></span>openvoice</a>
-        <div className={`status ${live ? 'live' : ''}`}><i />{working ? 'Connecting' : live ? 'Translating live' : 'Ready'}</div>
-      </header>
-
-      <main className={sourceUrl ? 'has-source' : ''}
-        onDragEnter={(event) => { event.preventDefault(); setDragging(true) }}
-        onDragOver={(event) => event.preventDefault()}
-        onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false) }}
-        onDrop={(event) => { event.preventDefault(); setDragging(false); void loadFile(event.dataTransfer.files[0]) }}>
-        {!sourceUrl ? (
-          <section className={`welcome ${dragging ? 'dragging' : ''}`}>
-            <div className="welcome-copy">
-              <p>REALTIME VIDEO TRANSLATION</p>
-              <h1>Every video,<br />in your language.</h1>
-              <span>Upload a video. We detect the spoken language and translate its voice and captions while it plays.</span>
-            </div>
-            <button className="dropzone" onClick={() => fileRef.current?.click()}>
-              <span><Upload size={23} /></span>
-              <strong>{dragging ? 'Drop it here' : 'Upload a video'}</strong>
-              <small>MP4, MOV, WebM, MP3 or WAV</small>
-            </button>
-            <button className="sample-button" onClick={loadSample}><Play size={12} fill="currentColor" /> Try the sample video</button>
-          </section>
-        ) : (
-          <div className="workspace">
-            <section className="player-column">
-              <div className="source-bar">
-                <div><Video size={14} /><span>{sourceName}</span></div>
-                <button onClick={() => fileRef.current?.click()}><Upload size={13} /> Replace</button>
-              </div>
-              <div className="video-frame">
-                <video ref={videoRef} src={sourceUrl} playsInline
-                  onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => { setPlaying(false); void interpreter.stop() }} />
-                {(interpreter.translatedCaption || interpreter.sourceCaption) && (
-                  <div className="captions">
-                    {interpreter.translatedCaption && <strong>{interpreter.translatedCaption}</strong>}
-                    {interpreter.sourceCaption && <small>{interpreter.sourceCaption}</small>}
-                  </div>
-                )}
-                {!playing && <button className="play" onClick={togglePlayback} disabled={working}>{working ? <LoaderCircle className="spin" size={24} /> : <Play size={26} fill="currentColor" />}</button>}
-              </div>
-              <div className="controls">
-                <button onClick={reset}><RotateCcw size={16} /></button>
-                <button className="primary-control" onClick={togglePlayback} disabled={working}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
-                <div className="control-line"><span className={live ? 'moving' : ''} /></div>
-                <span>{interpreter.status === 'speaking' ? 'Speaking translation' : live ? 'Listening' : working ? 'Starting…' : 'Paused'}</span>
-              </div>
-              {interpreter.error && <p className="error">{interpreter.error}</p>}
-            </section>
-
-            <aside>
-              <div className="aside-head"><p>TRANSLATION</p><span><Sparkles size={13} /> Higgs Realtime</span></div>
-
-              <section className="detected">
-                <small>DETECTED LANGUAGE</small>
-                <div><span>{interpreter.detectedLanguage}</span>{interpreter.detectedLanguage !== 'Detecting…' && <Check size={15} />}</div>
-                <p>{interpreter.sourceCaption || 'Play the video to identify its spoken language.'}</p>
-              </section>
-
-              <div className="flow-arrow"><span /><ArrowRight size={15} /><span /></div>
-
-              <label className="language-select">
-                <small>TRANSLATE TO</small>
-                <div><Languages size={18} /><select value={targetCode} onChange={(event) => changeLanguage(event.target.value)}>{targetLanguages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></div>
-              </label>
-
-              <section className="output-card">
-                <small>LIVE OUTPUT</small>
-                <p>{interpreter.translatedCaption || `Translated ${target.name} captions appear here as the new voice plays.`}</p>
-                <div className={live ? 'active' : ''}><i /><span>{live ? 'Realtime stream active' : 'Waiting for playback'}</span></div>
-              </section>
-
-              <p className="privacy">Audio streams directly to Boson using a short-lived session key. Your API key stays on the server.</p>
-            </aside>
+  return <div className="shell">
+    <header>
+      <a className="logo" href="/"><span><Languages size={18} /></span>openvoice</a>
+      <div className={`status ${player.playing ? 'live' : ''}`}><i />{player.playing ? player.state : preparing ? 'Preparing captions' : source.url ? 'Paused' : 'Ready'}</div>
+    </header>
+    <main className={source.url ? 'has-source' : ''} onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }}
+      onDrop={(event) => { event.preventDefault(); setDragging(false); void loadFile(event.dataTransfer.files[0]) }}>
+      {!source.url ? <section className={`welcome ${dragging ? 'dragging' : ''}`}>
+        <div className="welcome-copy"><p>VIDEO TRANSLATION</p><h1>Every video,<br />in your language.</h1><span>Upload a clip. We identify the speech, prepare captions, and translate its voice as you watch.</span></div>
+        <button className="dropzone" onClick={() => fileRef.current?.click()}><span><Upload size={23} /></span><strong>{dragging ? 'Drop it here' : 'Upload a video'}</strong><small>Audio or video · up to 200 MB / 10 minutes</small></button>
+        <button className="sample-button" onClick={() => void loadSample()}><Play size={12} fill="currentColor" /> Try the sample video</button>
+      </section> : <div className="workspace">
+        <section className="player-column">
+          <div className="source-bar"><div><Video size={14} /><span>{source.name}</span></div><button onClick={() => fileRef.current?.click()}><Upload size={13} /> Replace</button></div>
+          <div className="video-frame" style={{ aspectRatio: String(source.audioOnly ? 16 / 9 : ratio), maxWidth: `${(source.audioOnly ? 16 / 9 : ratio) * 65}vh` }}>
+            <video ref={videoRef} src={source.url} playsInline preload="auto" onLoadedMetadata={(event) => {
+              const media = event.currentTarget; setDuration(Number.isFinite(media.duration) ? media.duration : 0)
+              if (media.videoWidth && media.videoHeight) setRatio(media.videoWidth / media.videoHeight)
+            }} onError={() => { player.pause(); setFileError('This browser cannot play this file. Try an H.264 MP4 or WebM.') }} />
+            {source.audioOnly && <div className="audio-placeholder"><Headphones size={42} /><span>{source.name}</span></div>}
+            {caption && <div className="captions"><strong>{caption}</strong></div>}
+            {!player.playing && <button className="play" aria-label="Play video" onClick={() => { previewRef.current?.pause(); player.toggle() }}><Play size={26} fill="currentColor" /></button>}
           </div>
-        )}
-        <input ref={fileRef} hidden type="file" accept="video/*,audio/*" onChange={(event) => void loadFile(event.target.files?.[0])} />
-      </main>
-    </div>
-  )
+          <audio ref={audioRef} preload="auto" onError={() => { player.pause(); setFileError('Translated audio could not be loaded. Select the original audio or retry.') }} />
+          <div className="controls">
+            <button aria-label="Restart video" onClick={() => player.seek(0)}><RotateCcw size={16} /></button>
+            <button className="primary-control" aria-label={player.playing ? 'Pause video' : 'Play video'} onClick={() => { previewRef.current?.pause(); player.toggle() }}>{player.playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+            <input aria-label="Video position" type="range" min={0} max={duration || 1} step={0.05} value={player.time} onChange={(event) => player.seek(Number(event.target.value))} />
+            <span>{clock(player.time)} / {clock(duration)}</span>
+          </div>
+          <p className="playback-note" role="status">{player.playing ? player.state : 'Ready to play'}{targetCode !== 'original' ? ' · Translation buffers a short section ahead.' : ''}</p>
+        </section>
+        <aside>
+          <div className="aside-head"><p>LANGUAGE</p><span>{preparing ? `${completed}/${total || '…'} sections` : session.job?.status === 'ready' ? 'Captions prepared' : ''}</span></div>
+          <section className="detected"><small>SOURCE LANGUAGE</small><div><span>{session.job?.language ?? (preparing ? 'Identifying speech…' : 'Not yet identified')}</span></div><p>{session.job?.language ? 'Estimated from the transcribed speech.' : 'Waiting for enough clear speech to identify the language.'}</p></section>
+          <label className="language-select"><small>AUDIO & CAPTIONS</small><div><Languages size={18} /><select value={targetCode} onChange={(event) => { previewRef.current?.pause(); setTargetCode(event.target.value) }}><option value="original">Original</option>{targetLanguages.map((language) => <option key={language.code} value={language.code}>{language.name}</option>)}</select><ChevronDown size={15} /></div></label>
+          <section className="output-card"><small>{targetCode === 'original' ? 'SOURCE CAPTION' : 'TRANSLATED CAPTION'}</small><p>{caption || (dub?.text ? dub.text : preparing ? 'Extracting and transcribing your audio…' : 'Press play to see captions for this section.')}</p><div className={player.playing ? 'active' : ''}><i /><span>{player.playing ? player.state : 'Paused'}</span></div></section>
+          {session.job?.extractedAudioUrl && <details className="audio-check"><summary>Check extracted audio</summary><p>Listen to the exact track used for transcription.</p><audio ref={previewRef} src={session.job.extractedAudioUrl} controls onPlay={player.pause} /><small>24 kHz mono · {session.job.rmsDb?.toFixed(1)} dBFS RMS</small></details>}
+          {session.job?.segments.length ? <details className="transcript-check"><summary>Source transcript ({completed}/{total})</summary><div>{session.job.segments.map((item) => <button key={item.index} onClick={() => player.seek(item.start)}><small>{clock(item.start)}</small><span>{item.text || item.error || (item.state === 'ready' ? 'No speech' : 'Transcribing…')}</span></button>)}</div></details> : null}
+        </aside>
+      </div>}
+      {error && <p className="error" role="alert">{error}</p>}
+      <input ref={fileRef} hidden type="file" accept="video/*,audio/*" onChange={(event) => { void loadFile(event.target.files?.[0]); event.target.value = '' }} />
+    </main>
+  </div>
 }
