@@ -12,6 +12,8 @@ import { transcribe, translate, synthesize } from './boson.js'
 import { importYoutube, youtubeUrl } from './youtube.js'
 import { assemblePcm, decodeSpeech, durationGuide, fitSpeech, nextUnit, speechWindow, wav } from './tracks.js'
 import type { Track } from './tracks.js'
+import { WorkQueue } from './workQueue.js'
+import { MAX_SESSIONS, sessionExpired } from './sessionPolicy.js'
 
 const run = promisify(execFile)
 const root = await mkdtemp(path.join(tmpdir(), 'openvoice-'))
@@ -20,8 +22,8 @@ const languages: Record<string, string> = { en: 'English', es: 'Spanish', hi: 'H
 
 type Segment = { index: number; start: number; end: number; rmsDb: number; state: 'pending' | 'ready' | 'error'; text: string; error?: string }
 type Job = {
-  id: string; directory: string; createdAt: number; controller: AbortController;
-  status: 'importing' | 'extracting' | 'transcribing' | 'ready' | 'error'; error?: string; message?: string; videoUrl?: string;
+  id: string; directory: string; lastSeenAt: number; controller: AbortController;
+  status: 'queued' | 'importing' | 'extracting' | 'transcribing' | 'ready' | 'error'; error?: string; message?: string; videoUrl?: string;
   name: string; duration: number; width: number; height: number; sampleRate: number;
   rmsDb?: number; peakDb?: number; language: string | null; segments: Segment[];
   tracks: Record<string, Track>; requestedLanguage: string; selection: number; position: number; listeners: Set<(data: string) => void>;
@@ -35,7 +37,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : '
 
 async function processMedia(job: Job, file: string, keepVideo = false) {
   try {
-    job.status = 'extracting'; publish(job)
+    job.status = 'extracting'; job.message = 'Extracting audio…'; publish(job)
     const { stdout } = await run('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file], { signal: job.controller.signal, timeout: 20000, maxBuffer: 1024 * 1024 })
     const info = JSON.parse(stdout)
     const audio = info.streams.find((stream: { codec_type: string }) => stream.codec_type === 'audio')
@@ -53,7 +55,7 @@ async function processMedia(job: Job, file: string, keepVideo = false) {
     await run('ffmpeg', ['-v', 'error', '-nostdin', '-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '1', '-i', pcmFile, path.join(job.directory, 'source.wav')], { signal: job.controller.signal, timeout: 30000 })
     job.segments = segmentAudio(pcm).map((segment) => ({ ...segment, text: '', state: 'pending' }))
     for (const track of Object.values(job.tracks)) track.total = job.segments.length
-    job.status = 'transcribing'; publish(job)
+    job.status = 'transcribing'; job.message = 'Preparing captions…'; publish(job)
     for (const segment of job.segments) {
       if (job.controller.signal.aborted) return
       try {
@@ -145,19 +147,20 @@ async function prepareStep(job: Job, language: string, track: Track) {
 async function createJob(name: string, status: Job['status']) {
   const id = randomUUID(); const directory = path.join(root, id)
   await mkdir(directory)
-  const job: Job = { id, directory, createdAt: Date.now(), controller: new AbortController(), status, name,
+  const job: Job = { id, directory, lastSeenAt: Date.now(), controller: new AbortController(), status, name,
     duration: 0, width: 0, height: 0, sampleRate: SAMPLE_RATE, language: null, segments: [], tracks: {}, requestedLanguage: 'original', selection: 0, position: 0, listeners: new Set() }
   jobs.set(id, job)
   return job
 }
-const busy = () => [...jobs.values()].filter((job) => ['importing', 'extracting', 'transcribing'].includes(job.status)).length >= 2
+const sourceQueue = new WorkQueue(2)
 
 export const mediaRouter = Router()
 let incomingUploads = 0
 // Reject before accepting large bodies; never let anonymous uploads fill disk.
 mediaRouter.use((request, response, next) => {
   if (request.method !== 'POST' || !['/', '/youtube'].includes(request.path)) return next()
-  if (jobs.size >= 8 || incomingUploads >= 2 || busy()) return response.status(429).json({ error: 'The demo is busy. Please try again shortly.' })
+  for (const job of jobs.values()) if (sessionExpired(job.lastSeenAt, job.listeners.size)) void removeJob(job)
+  if (jobs.size + incomingUploads >= MAX_SESSIONS || incomingUploads >= 2) return response.set('Retry-After', '5').status(503).json({ code: 'SERVER_BUSY', retryAfter: 5, error: 'All demo slots are occupied. Waiting for a slot to open…' })
   incomingUploads++
   let released = false
   const release = () => { if (!released) { released = true; incomingUploads-- } }
@@ -166,38 +169,39 @@ mediaRouter.use((request, response, next) => {
 })
 mediaRouter.post('/', upload.single('file'), async (request, response) => {
   if (!request.file) return response.status(400).json({ error: 'Choose an audio or video file.' })
-  if (busy()) {
-    await rm(request.file.path, { force: true }); return response.status(429).json({ error: 'Two files are already processing. Please wait.' })
-  }
-  const job = await createJob(request.file.originalname, 'extracting')
+  const file = request.file.path
+  const job = await createJob(request.file.originalname, 'queued')
+  job.message = 'Waiting for a processing slot…'
   response.status(202).json(view(job))
-  void processMedia(job, request.file.path)
+  void sourceQueue.run(job.controller.signal, () => processMedia(job, file))
+    .catch(() => rm(file, { force: true }).catch(() => undefined))
 })
 mediaRouter.post('/youtube', async (request, response) => {
   let url: string
   try { url = youtubeUrl(request.body?.url) } catch (error) { return response.status(400).json({ error: errorText(error) }) }
-  if (busy()) return response.status(429).json({ error: 'Two videos are already processing. Please wait.' })
-  const job = await createJob('YouTube video', 'importing')
+  const job = await createJob('YouTube video', 'queued')
+  job.message = 'Waiting for a processing slot…'
   response.status(202).json(view(job))
-  void (async () => {
+  void sourceQueue.run(job.controller.signal, async () => {
     try {
+      job.status = 'importing'; publish(job)
       const file = await importYoutube(url, job.directory, job.controller.signal, (message, title) => { job.message = message; if (title) job.name = title; publish(job) })
       job.videoUrl = `/api/media/${job.id}/video`; job.message = 'Preparing captions…'
       await processMedia(job, file, true)
     } catch (error) {
       if (!job.controller.signal.aborted) { job.status = 'error'; job.error = errorText(error); publish(job) }
     }
-  })()
+  }).catch(() => undefined) // Removing a waiting session cancels its queued work.
 })
-mediaRouter.get('/:id', (request, response) => { const job = jobs.get(request.params.id); return job ? response.json(view(job)) : response.status(404).json({ error: 'Media session expired. Upload it again.' }) })
+mediaRouter.get('/:id', (request, response) => { const job = jobs.get(request.params.id); if (job) job.lastSeenAt = Date.now(); return job ? response.json(view(job)) : response.status(404).json({ error: 'Media session expired. Upload it again.' }) })
 mediaRouter.get('/:id/events', (request, response) => {
   const job = jobs.get(request.params.id)
   if (!job) return response.sendStatus(404)
   response.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' }); response.flushHeaders()
   const listener = (data: string) => response.write(`data: ${data}\n\n`)
-  job.listeners.add(listener); listener(JSON.stringify(view(job)))
+  job.lastSeenAt = Date.now(); job.listeners.add(listener); listener(JSON.stringify(view(job)))
   const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15000)
-  request.on('close', () => { clearInterval(heartbeat); job.listeners.delete(listener) })
+  request.on('close', () => { clearInterval(heartbeat); job.listeners.delete(listener); job.lastSeenAt = Date.now() })
 })
 mediaRouter.get('/:id/source.wav', (request, response) => {
   const job = jobs.get(request.params.id)
@@ -243,4 +247,4 @@ mediaRouter.delete('/:id', async (request, response) => {
   const job = jobs.get(request.params.id); if (job) await removeJob(job)
   response.sendStatus(204)
 })
-setInterval(() => { for (const job of jobs.values()) if (Date.now() - job.createdAt > 3600000 && !job.listeners.size) void removeJob(job) }, 60000).unref()
+setInterval(() => { for (const job of jobs.values()) if (sessionExpired(job.lastSeenAt, job.listeners.size)) void removeJob(job) }, 15000).unref()

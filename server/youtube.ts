@@ -27,6 +27,22 @@ export function validateYoutubeInfo(info: { duration?: number; is_live?: boolean
   if (info.availability && !['public', 'unlisted'].includes(info.availability)) throw new Error('This video requires access. Upload a local file you have permission to use.')
 }
 
+export function youtubeFailure(error: unknown): Error {
+  const failure = error as Error & { code?: string; path?: string; stderr?: string; killed?: boolean }
+  const detail = failure.stderr ?? ''
+  let message: string | undefined
+  if (failure.code === 'ENOENT' && !failure.path?.includes('video.mp4')) message = 'The server’s YouTube downloader is unavailable. Upload a file while this is repaired.'
+  else if (failure.killed || failure.code === 'ETIMEDOUT') message = 'YouTube took too long to respond. Try this link again, or upload the file.'
+  else if (/429|too many requests/i.test(detail)) message = 'YouTube is temporarily rate-limiting downloads from this server. Wait a few minutes or upload the file. This is separate from the speech limit.'
+  else if (/confirm you.?re not a bot|sign in to confirm|captcha/i.test(detail)) message = 'YouTube is blocking this server with a sign-in or bot check. This public demo cannot import that video right now. Upload a file you have permission to use.'
+  else if (/private video|members.only|sign in|age.restricted|not available in your country|geo.?restrict/i.test(detail)) message = 'This video requires sign-in or is age-, membership-, or region-restricted. Use a public unrestricted clip or upload an authorized file.'
+  else if (/requested format is not available/i.test(detail)) message = 'This video has no downloadable format supported by the demo. Upload an H.264 MP4 file instead.'
+  else if (/not available|removed|unavailable/i.test(detail)) message = 'YouTube reports this video is unavailable or removed. Check the link or choose another video.'
+  else if (/larger than max|filesize/i.test(detail)) message = 'This video exceeds the 200 MB demo limit. Upload a smaller export.'
+  else if (detail || failure.code === 'ENOENT') message = 'YouTube could not finish the download. Try this link again, or upload a file. No browser cookies are used.'
+  return message ? new Error(message, { cause: error }) : error instanceof Error ? error : new Error('YouTube import failed.')
+}
+
 export async function importYoutube(url: string, directory: string, signal: AbortSignal, progress: (message: string, title?: string) => void) {
   const base = ['--ignore-config', '--no-plugin-dirs', '--no-playlist', '--no-cache-dir', '--no-remote-components', '--js-runtimes', `node:${process.execPath}`, '--socket-timeout', '15', '--retries', '1', '--extractor-retries', '1']
   try {
@@ -42,10 +58,6 @@ export async function importYoutube(url: string, directory: string, signal: Abor
     return file
   } catch (error) {
     if (signal.aborted) throw new Error('Import cancelled.', { cause: error })
-    const failure = error as Error & { code?: string; path?: string; stderr?: string; killed?: boolean }
-    if (failure.code === 'ENOENT' && !failure.path?.includes('video.mp4')) throw new Error('YouTube import needs yt-dlp on the server. Install it with brew install yt-dlp, then retry.', { cause: error })
-    if (failure.killed) throw new Error('YouTube took too long to respond. Retry or upload the file instead.', { cause: error })
-    if (failure.stderr || failure.code === 'ENOENT') throw new Error('YouTube could not provide this video. It may be restricted, unavailable, or blocking downloads. Try another public clip or upload a file. No browser cookies are used.', { cause: error })
-    throw error
+    throw youtubeFailure(error)
   }
 }

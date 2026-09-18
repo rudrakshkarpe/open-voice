@@ -1,5 +1,10 @@
 import WebSocket from 'ws'
 import { providerBudget } from './budget.js'
+import { WorkQueue } from './workQueue.js'
+
+// Source transcription previously bypassed the translation scheduler and could
+// open concurrent provider requests. Share one slot across every speech stage.
+const providerQueue = new WorkQueue(1)
 
 type Event = { type: string; transcript?: string; delta?: string; text?: string; error?: { message?: string }; response?: { status?: string } }
 
@@ -67,10 +72,11 @@ function realtime(kind: 'transcribe' | 'translate', input: Buffer | string, sign
   })
 }
 
-export const transcribe = (pcm: Buffer, signal: AbortSignal) => realtime('transcribe', pcm, signal)
-export const translate = (text: string, language: string, signal: AbortSignal, onDelta: (text: string) => void, guide = '') => realtime('translate', text, signal, language, onDelta, guide)
+export const transcribe = (pcm: Buffer, signal: AbortSignal) => providerQueue.run(signal, () => realtime('transcribe', pcm, signal))
+export const translate = (text: string, language: string, signal: AbortSignal, onDelta: (text: string) => void, guide = '') => providerQueue.run(signal, () => realtime('translate', text, signal, language, onDelta, guide))
 
-export async function synthesize(text: string, signal: AbortSignal) {
+export const synthesize = (text: string, signal: AbortSignal) => providerQueue.run(signal, () => synthesizeWithRetry(text, signal))
+async function synthesizeWithRetry(text: string, signal: AbortSignal) {
   for (let attempt = 0; attempt < 5; attempt++) {
   providerBudget.take()
   const response = await fetch('https://api.boson.ai/v1/audio/speech', {
