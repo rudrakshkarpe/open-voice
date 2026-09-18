@@ -17,6 +17,8 @@ Browser / SDK
 
 LiveKit provides WebRTC transport, rooms, track publication, adaptive streaming, reconnection, and server-side agents. OpenVoice should own voice selection and generation while LiveKit owns realtime media delivery. That avoids building packet-loss handling and jitter buffering during a hackathon.
 
+Boson's first-party Higgs Realtime integration for LiveKit is currently marked as coming soon. Until then, the gateway should bridge the two services itself, or connect directly to Higgs Realtime over WebSocket. The present TTS preview uses the server-side REST gateway in `server/index.ts`.
+
 Start with one room per demo session:
 
 - `source` track: the user's original microphone or uploaded media;

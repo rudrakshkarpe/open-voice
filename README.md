@@ -9,16 +9,21 @@ The current hackathon build includes:
 - a realtime spectrum visualizer and animated voice-aware theme;
 - switch markers written onto the playback timeline;
 - local media replacement for testing another audio or video file;
-- clearly labelled seams for Boson Higgs generation and LiveKit transport.
+- drag-and-drop support for arbitrary browser-playable audio and video;
+- authenticated Higgs TTS 3 previews with language, voice, and delivery controls;
+- clearly labelled seams for LiveKit transport.
 
 ## Run it
 
 ```bash
 npm install
+cp .env.example .env.local # or create .env.local manually
 npm run dev
 ```
 
-Open `http://localhost:5173`, press play, and choose a voice profile while the clip is running.
+Replace `BOSON_API_KEY` in `.env.local` with your server-side Boson key. The file is ignored by Git. Do not use a `VITE_` prefix for secrets because Vite exposes those values to the browser.
+
+Open `http://localhost:5173`. Drop any browser-playable audio/video onto the source panel or press **Replace media**. Use **Live FX** for immediate processing or **Higgs TTS** for a generated voice preview.
 
 ```bash
 npm run build
@@ -29,9 +34,11 @@ npm run lint
 
 The browser demo is intentionally resilient: its Web Audio graph performs real, immediate tonal transformations without a network request. These profiles are not presented as neural voice cloning.
 
-The production path sends phrase-aligned audio through a voice gateway:
+Higgs automatically detects the language from the script across its 102 supported languages. The UI also exposes common ISO language codes for short and mixed-language text, where normalization detection is less reliable.
 
-1. LiveKit transports microphone or media audio.
+The production path for replacing an entire video's speech sends phrase-aligned audio through a voice gateway:
+
+1. LiveKit or direct WebRTC transports microphone or media audio.
 2. Voice activity detection cuts it at natural boundaries.
 3. Speech-to-text produces phrase text when the chosen provider needs it.
 4. Higgs streams generated speech in the selected, consented voice.
