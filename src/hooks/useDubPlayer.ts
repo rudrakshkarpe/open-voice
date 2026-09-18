@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MediaJob } from './useMediaSession'
 import { targetLanguages } from '../lib/languages'
-import { audioTimeAt, switchBoundary, videoCorrection, videoRateAt, videoTimeAt } from '../lib/playback'
+import { videoCorrection } from '../lib/playback'
+import { AudioQueue, bufferedAhead, canStartStream, chunkAt } from '../lib/audioQueue'
+import type { AudioChunk } from '../lib/audioQueue'
 
 const name = (language: string) => targetLanguages.find((item) => item.code === language)?.name ?? 'Original'
-type Voice = { source: AudioBufferSourceNode; gain: GainNode; started: number; offset: number }
 
 export function useDubPlayer(job: MediaJob | null, language: string) {
   const video = useRef<HTMLVideoElement | null>(null)
   const context = useRef<AudioContext | null>(null)
-  const voice = useRef<Voice | null>(null)
+  const queue = useRef<AudioQueue | null>(null)
   const buffers = useRef(new Map<string, AudioBuffer>())
   const loading = useRef(new Set<string>())
   const downloadErrors = useRef(new Map<string, string>())
@@ -21,65 +22,63 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
   const [translationError, setTranslationError] = useState('')
   const [audioStarts, setAudioStarts] = useState(0)
   const [drift, setDrift] = useState(0)
+  const [buffered, setBuffered] = useState(0)
+  const [stalls, setStalls] = useState(0)
   const [activeLanguage, setActiveLanguage] = useState('original')
   const [activity, setActivity] = useState<string[]>([])
   const active = useRef('original')
   const desired = useRef(false)
+  const finished = useRef(false)
   const latest = useRef({ job, language })
   const starting = useRef(false)
   const epoch = useRef(0)
   const selection = useRef(0)
   const requestMessage = useRef<string | null>(null)
-  const pendingSwitch = useRef<{ language: string; at: number } | null>(null)
+  const lastRequest = useRef({ at: 0, position: -1 })
   useEffect(() => { latest.current = { job, language } }, [job, language])
 
-  const stopVoice = useCallback(() => {
-    const current = voice.current
-    if (!current || !context.current) return
-    const now = context.current.currentTime
-    current.gain.gain.cancelScheduledValues(now)
-    current.gain.gain.setValueAtTime(current.gain.gain.value, now)
-    current.gain.gain.linearRampToValueAtTime(0, now + 0.015)
-    current.source.stop(now + 0.02)
-    voice.current = null
-  }, [])
+  const stopVoice = useCallback(() => { queue.current?.stop(); queue.current = null }, [])
   const pause = useCallback(() => {
     desired.current = false; epoch.current++; video.current?.pause(); stopVoice(); setPlaying(false); setState('Paused')
   }, [stopVoice])
   const reset = useCallback(() => {
-    pause(); buffers.current.clear(); loading.current.clear(); downloadErrors.current.clear(); pendingSwitch.current = null
+    pause(); buffers.current.clear(); loading.current.clear(); downloadErrors.current.clear(); finished.current = false
     for (const controller of controllers.current) controller.abort()
-    controllers.current.clear(); active.current = 'original'; setActiveLanguage('original'); setActivity([]); setTime(0); setError(''); setTranslationError(''); setAudioStarts(0); setDrift(0)
+    controllers.current.clear(); active.current = 'original'; setActiveLanguage('original'); setActivity([]); setTime(0); setError(''); setTranslationError(''); setAudioStarts(0); setDrift(0); setBuffered(0); setStalls(0)
     if (video.current) { video.current.currentTime = 0; video.current.muted = false; video.current.playbackRate = 1 }
   }, [pause])
-  const seek = useCallback((next: number) => {
-    epoch.current++; video.current?.pause(); stopVoice(); pendingSwitch.current = null
-    if (video.current) video.current.currentTime = next
-    setTime(next)
-  }, [stopVoice])
-  const play = useCallback(() => {
-    context.current ??= new AudioContext()
-    void context.current.resume().catch(() => setError('Audio could not start. Press play again.'))
-    if (video.current?.ended) video.current.currentTime = 0
-    setError(''); desired.current = true; setPlaying(true)
-  }, [])
-  const toggle = useCallback(() => { if (desired.current) pause(); else play() }, [pause, play])
-  const buffering = useCallback(() => { epoch.current++; stopVoice() }, [stopVoice])
 
   const requestTrack = useCallback(async (id: string, target: string, retry = false) => {
     const version = ++selection.current
+    const position = video.current?.currentTime ?? 0
+    lastRequest.current = { at: Date.now(), position }
     try {
-      const response = await fetch(`/api/media/${id}/tracks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ language: target, retry, selection: version }) })
-      if (!response.ok) { const body = await response.json(); throw new Error(body.error ?? 'Could not prepare this language.') }
+      const response = await fetch(`/api/media/${id}/tracks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ language: target, retry, selection: version, position }) })
+      if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error ?? 'Media session expired or unavailable. Upload the video again.') }
       if (version === selection.current) requestMessage.current = ''
     } catch (caught) { if (version === selection.current) requestMessage.current = caught instanceof Error ? caught.message : 'Connection failed.' }
   }, [])
   const jobId = job?.id
   useEffect(() => { if (jobId) void requestTrack(jobId, language) }, [jobId, language, requestTrack])
+  const seek = useCallback((next: number) => {
+    epoch.current++; video.current?.pause(); stopVoice(); finished.current = false
+    if (video.current) video.current.currentTime = next
+    setTime(next)
+    const current = latest.current
+    if (current.job) void requestTrack(current.job.id, current.language)
+  }, [stopVoice, requestTrack])
+  const play = useCallback(() => {
+    context.current ??= new AudioContext()
+    void context.current.resume().catch(() => setError('Audio could not start. Press play again.'))
+    if (finished.current || video.current?.ended) seek(0)
+    finished.current = false; setError(''); desired.current = true; setPlaying(true)
+  }, [seek])
+  const toggle = useCallback(() => { if (desired.current) pause(); else play() }, [pause, play])
+  const buffering = useCallback(() => { epoch.current++; stopVoice() }, [stopVoice])
   const retry = useCallback(() => {
     const current = latest.current
     if (current.job) {
-      downloadErrors.current.delete(`${current.job.id}/${current.language}`)
+      for (const key of downloadErrors.current.keys()) if (key.startsWith(`${current.job.id}/${current.language}/`)) downloadErrors.current.delete(key)
       void requestTrack(current.job.id, current.language, true)
     }
   }, [requestTrack])
@@ -93,78 +92,97 @@ export function useDubPlayer(job: MediaJob | null, language: string) {
       const { job: current, language: target } = latest.current
       const position = media.currentTime; setTime(position)
       const targetTrack = current?.tracks[target]
-      const key = `${current?.id}/${target}`
-      if (targetTrack?.state === 'ready' && targetTrack.audioUrl && !buffers.current.has(key) && !loading.current.has(key) && !downloadErrors.current.has(key)) {
-        context.current ??= new AudioContext()
-        loading.current.add(key)
-        const controller = new AbortController(); localControllers.add(controller)
-        void fetch(targetTrack.audioUrl, { signal: controller.signal }).then(async (response) => {
-          if (!response.ok) throw new Error('Prepared audio could not be downloaded. Retry this language.')
-          const buffer = await context.current!.decodeAudioData(await response.arrayBuffer())
-          if (controller.signal.aborted || latest.current.job?.id !== current?.id) return
-          buffers.current.set(key, buffer)
-          for (const cached of buffers.current.keys()) {
-            if (buffers.current.size <= 3) break
-            if (cached !== key && cached !== `${current?.id}/${active.current}`) buffers.current.delete(cached)
-          }
-        }).catch((caught: Error) => { if (!controller.signal.aborted) downloadErrors.current.set(key, caught.message) })
-          .finally(() => { loading.current.delete(key); localControllers.delete(controller) })
-      }
-      const ready = target === 'original' || buffers.current.has(key)
-      if (target !== active.current && ready) {
-        if (pendingSwitch.current?.language !== target) pendingSwitch.current = { language: target, at: !desired.current || target === 'original' ? position : switchBoundary(targetTrack?.segments.map((segment) => segment.start) ?? [], position) }
-        if (!desired.current || position >= pendingSwitch.current.at) {
-          epoch.current++; stopVoice(); active.current = target; setActiveLanguage(target); media.playbackRate = 1; pendingSwitch.current = null
-          setActivity((items) => [`${name(target)} active at ${Math.floor(position)}s`, ...items].slice(0, 5))
+      const keyFor = (lang: string, chunk: AudioChunk) => `${current?.id}/${lang}/${chunk.index}`
+      const available = (lang: string) => (chunk: AudioChunk) => buffers.current.has(keyFor(lang, chunk))
+
+      // Send a playhead revision, not a growing queue of requests for old choices.
+      if (current && target !== 'original' && targetTrack?.state !== 'ready' && Date.now() - lastRequest.current.at > 2000 && Math.abs(position - lastRequest.current.position) > 1) void requestTrack(current.id, target)
+
+      const protectedKeys = new Set<string>()
+      for (const lang of new Set([target, active.current])) {
+        const chunks = current?.tracks[lang]?.segments ?? []
+        const near = chunks.filter((chunk) => chunk.end > position && chunk.start < position + 30).slice(0, 5)
+        for (const chunk of near) {
+          const key = keyFor(lang, chunk); protectedKeys.add(key)
+          if (buffers.current.has(key) || loading.current.has(key) || downloadErrors.current.has(key) || localControllers.size >= 4) continue
+          context.current ??= new AudioContext()
+          loading.current.add(key)
+          const controller = new AbortController(); localControllers.add(controller)
+          void fetch(chunk.audioUrl, { signal: controller.signal }).then(async (response) => {
+            if (!response.ok) throw new Error('An audio section could not be downloaded. Retry the stream.')
+            const buffer = await context.current!.decodeAudioData(await response.arrayBuffer())
+            if (!controller.signal.aborted && latest.current.job?.id === current?.id) buffers.current.set(key, buffer)
+          }).catch((caught: Error) => { if (!controller.signal.aborted) downloadErrors.current.set(key, caught.message) })
+            .finally(() => { loading.current.delete(key); localControllers.delete(controller) })
         }
-      } else if (target === active.current || pendingSwitch.current?.language !== target) pendingSwitch.current = null
-      const activeKey = `${current?.id}/${active.current}`
-      const activeBuffer = buffers.current.get(activeKey)
-      media.muted = active.current !== 'original'
-      const targetError = targetTrack?.error ?? downloadErrors.current.get(key)
-      setTranslationError(targetError ?? '')
-      const preparation = target !== active.current ? targetError ? `${name(target)} preparation failed · current audio unchanged` : ready ? `Switching to ${name(target)} at the next section` : `Preparing ${name(target)} · ${targetTrack?.completed ?? 0}/${targetTrack?.total || '…'} sections` : ''
-      if (!desired.current || starting.current) { if (!desired.current) setState(preparation || (media.ended ? 'Finished · press play to restart' : 'Paused')); return }
-      if (media.ended) {
-        // Video can arrive a few milliseconds before the audio clock. Let the
-        // final spoken sound finish instead of cutting it at the visual endpoint.
-        if (active.current !== 'original' && activeBuffer && voice.current && context.current && voice.current.offset + context.current.currentTime - voice.current.started < activeBuffer.duration) { setState('Finishing translated audio…'); return }
-        pause(); setState('Finished · press play to restart'); return
       }
+      for (const key of buffers.current.keys()) {
+        if (buffers.current.size <= 48) break
+        if (!protectedKeys.has(key)) buffers.current.delete(key)
+      }
+
+      const ready = target === 'original' || canStartStream(targetTrack?.segments ?? [], position, current?.duration ?? 0, available(target))
+      if (target !== active.current && ready) {
+        epoch.current++; stopVoice(); active.current = target; setActiveLanguage(target); media.playbackRate = 1
+        setActivity((items) => [`${name(target)} active at ${Math.floor(position)}s`, ...items].slice(0, 5))
+      }
+      const chunks = current?.tracks[active.current]?.segments ?? []
+      media.muted = active.current !== 'original'
+      const downloadError = [...downloadErrors.current.entries()].find(([key]) => key.startsWith(`${current?.id}/${target}/`))?.[1]
+      const targetError = targetTrack?.error ?? downloadError
+      setTranslationError(targetError ?? '')
+      const preparation = target !== active.current ? targetError ? `${name(target)} needs attention · current audio unchanged` : `Buffering ${name(target)} near ${Math.floor(position)}s${desired.current ? ' · current audio continues' : ''}` : ''
+      setBuffered(Math.round(bufferedAhead(chunks, position, available(active.current)) * 10) / 10)
+      if (!desired.current || starting.current) { if (!desired.current) setState(finished.current ? 'Finished · press play to restart' : preparation || 'Paused'); return }
       if (media.readyState < 3 || media.seeking) { stopVoice(); setState('Buffering video…'); return }
-      if (active.current !== 'original' && !activeBuffer) { pause(); setError('The prepared track is unavailable. Select Original or retry.'); return }
+
+      if (active.current !== 'original') {
+        if (!context.current || context.current.state !== 'running') { pause(); setError('Press play to enable translated audio.'); return }
+        // Append before a section ends, scheduling on the shared audio clock.
+        const appendAhead = () => {
+          while (queue.current?.tail && queue.current.ahead < 20) {
+            const next = chunks.find((chunk) => chunk.index === queue.current!.tail!.chunk.index + 1)
+            const buffer = next && buffers.current.get(keyFor(active.current, next))
+            if (!next || !buffer || !queue.current.append(next, buffer)) break
+          }
+        }
+        appendAhead()
+        if (queue.current?.exhausted) {
+          const end = queue.current.tail!.chunk.end
+          stopVoice(); media.pause(); media.currentTime = Math.min(end, media.duration)
+          if (end >= (current?.duration ?? media.duration) - 0.05) { finished.current = true; pause(); setState('Finished · press play to restart'); return }
+          setStalls((count) => count + 1)
+        }
+        if (media.ended && queue.current) { setState('Finishing translated audio…'); return }
+        if (media.ended && !queue.current) { finished.current = true; pause(); setState('Finished · press play to restart'); return }
+        if (!queue.current && !canStartStream(chunks, media.currentTime, current?.duration ?? 0, available(active.current))) {
+          media.pause(); setState(`Buffering the next ${name(active.current)} phrase…`); return
+        }
+      } else if (media.ended) { finished.current = true; pause(); setState('Finished · press play to restart'); return }
+
       if (media.paused) {
         starting.current = true; const version = epoch.current
         try { await media.play(); if (version !== epoch.current || !desired.current) { media.pause(); return } }
         catch { pause(); setError('Press play again to start the video.'); return }
         finally { starting.current = false }
       }
-      if (activeBuffer && active.current !== 'original' && context.current) {
-        if (context.current.state !== 'running') { pause(); setError('Press play to enable translated audio.'); return }
-        const sections = current?.tracks[active.current]?.segments ?? []
-        const offset = audioTimeAt(sections, media.currentTime)
-        if (!voice.current && offset < activeBuffer.duration) {
-          const source = context.current.createBufferSource(); const gain = context.current.createGain()
-          source.buffer = activeBuffer; source.connect(gain); gain.connect(context.current.destination)
-          const now = context.current.currentTime
-          gain.gain.setValueAtTime(0, now); gain.gain.linearRampToValueAtTime(1, now + 0.015)
-          source.start(now, offset)
-          voice.current = { source, gain, started: now, offset }
+      if (active.current !== 'original' && context.current) {
+        if (!queue.current) {
+          const chunk = chunkAt(chunks, media.currentTime)
+          const buffer = chunk && buffers.current.get(keyFor(active.current, chunk))
+          if (!chunk || !buffer) { media.pause(); return }
+          queue.current = new AudioQueue(context.current)
+          queue.current.append(chunk, buffer, media.currentTime)
           setAudioStarts((count) => count + 1)
-          source.onended = () => { source.disconnect(); gain.disconnect() }
         }
-        if (voice.current) {
-          const audioPosition = voice.current.offset + context.current.currentTime - voice.current.started
-          const expectedVideoTime = videoTimeAt(sections, audioPosition)
-          setDrift(Math.round((expectedVideoTime - media.currentTime) * 1000))
-          media.playbackRate = videoRateAt(sections, audioPosition) * videoCorrection(expectedVideoTime, media.currentTime)
-        }
+        const clock = queue.current.clock()
+        if (clock) { setDrift(Math.round((clock.position - media.currentTime) * 1000)); media.playbackRate = clock.rate * videoCorrection(clock.position, media.currentTime) }
       } else { media.playbackRate = 1; setDrift(0) }
-      setState(preparation ? `Playing ${name(active.current)} · ${preparation}` : `Playing ${name(active.current)}`)
+      setState(preparation ? `Playing ${name(active.current)} · ${preparation}` : `Playing ${name(active.current)}${active.current !== 'original' ? ' · progressive stream' : ''}`)
     }
-    const interval = setInterval(() => { void tick() }, 50)
+    const interval = setInterval(() => { void tick() }, 40)
     return () => { clearInterval(interval); for (const controller of localControllers) controller.abort(); stopVoice() }
-  }, [pause, stopVoice])
+  }, [pause, stopVoice, requestTrack])
 
-  return { videoRef: video, playing, time, state, error, translationError, audioStarts, drift, activeLanguage, activity, play, toggle, pause, reset, seek, buffering, retry }
+  return { videoRef: video, playing, time, state, error, translationError, audioStarts, drift, buffered, stalls, activeLanguage, activity, play, toggle, pause, reset, seek, buffering, retry }
 }

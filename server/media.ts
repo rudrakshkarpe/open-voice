@@ -10,8 +10,8 @@ import { detectLanguage } from './language.js'
 import { SAMPLE_RATE, BYTES_PER_SECOND, segmentAudio, signalStats } from './audio.js'
 import { transcribe, translate, synthesize } from './boson.js'
 import { importYoutube, youtubeUrl } from './youtube.js'
-import { assemblePcm, decodeSpeech, durationGuide, fitSpeech, MAX_TEMPO, speechWindow, translationUnits, wav } from './tracks.js'
-import type { Track, Unit } from './tracks.js'
+import { assemblePcm, decodeSpeech, durationGuide, fitSpeech, nextUnit, speechWindow, wav } from './tracks.js'
+import type { Track } from './tracks.js'
 
 const run = promisify(execFile)
 const root = await mkdtemp(path.join(tmpdir(), 'openvoice-'))
@@ -24,7 +24,7 @@ type Job = {
   status: 'importing' | 'extracting' | 'transcribing' | 'ready' | 'error'; error?: string; message?: string; videoUrl?: string;
   name: string; duration: number; width: number; height: number; sampleRate: number;
   rmsDb?: number; peakDb?: number; language: string | null; segments: Segment[];
-  tracks: Record<string, Track>; requestedLanguage: string; selection: number; units: Unit[]; parts: Record<string, { start: number; end: number; pcm: Buffer }[]>; listeners: Set<(data: string) => void>;
+  tracks: Record<string, Track>; requestedLanguage: string; selection: number; position: number; listeners: Set<(data: string) => void>;
 }
 const jobs = new Map<string, Job>()
 const view = (job: Job) => ({ id: job.id, name: job.name, status: job.status, error: job.error, duration: job.duration, width: job.width, height: job.height,
@@ -52,6 +52,7 @@ async function processMedia(job: Job, file: string, keepVideo = false) {
     if (!pcm.length || (job.peakDb ?? -180) < -60) throw new Error('The extracted track is silent. Choose a clip with audible speech.')
     await run('ffmpeg', ['-v', 'error', '-nostdin', '-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '1', '-i', pcmFile, path.join(job.directory, 'source.wav')], { signal: job.controller.signal, timeout: 30000 })
     job.segments = segmentAudio(pcm).map((segment) => ({ ...segment, text: '', state: 'pending' }))
+    for (const track of Object.values(job.tracks)) track.total = job.segments.length
     job.status = 'transcribing'; publish(job)
     for (const segment of job.segments) {
       if (job.controller.signal.aborted) return
@@ -62,11 +63,10 @@ async function processMedia(job: Job, file: string, keepVideo = false) {
         job.language = detectLanguage(evidence) ?? job.language
       } catch (error) { segment.state = 'error'; segment.error = errorText(error) }
       publish(job)
+      schedule(job)
     }
     job.status = job.segments.every((segment) => segment.state === 'error') ? 'error' : 'ready'
     if (job.status === 'error') job.error = job.segments[0]?.error ?? 'Transcription failed.'
-    job.units = translationUnits(job.segments)
-    for (const track of Object.values(job.tracks)) track.total = job.units.length
     publish(job)
     schedule(job)
   } catch (error) {
@@ -87,7 +87,13 @@ function drain() {
   const job = queue.shift()
   if (!job) return
   const language = job.requestedLanguage; const track = job.tracks[language]
-  if (job.controller.signal.aborted || job.status !== 'ready' || !track || ['ready', 'error'].includes(track.state)) { drain(); return }
+  if (job.controller.signal.aborted || !['transcribing', 'ready'].includes(job.status) || !track || ['ready', 'error'].includes(track.state)) { drain(); return }
+  if (nextUnit(job.segments, track.segments.map((unit) => unit.index), job.position) < 0) {
+    if (job.status === 'ready' && job.segments.some((segment) => segment.state === 'error')) {
+      track.state = 'error'; track.error = 'Some source sections could not be transcribed. Available translated sections can still play; re-upload to recover missing speech.'; publish(job)
+    }
+    drain(); return
+  }
   active = true
   void prepareStep(job, language, track).finally(() => { active = false; schedule(job) })
 }
@@ -95,46 +101,41 @@ function drain() {
 async function prepareStep(job: Job, language: string, track: Track) {
   const signal = job.controller.signal
   try {
-    if (job.segments.some((segment) => segment.state === 'error')) throw new Error('Some source speech could not be transcribed. Re-upload before translating.')
-    track.state = 'preparing'; track.total = job.units.length
-    const index = track.completed; const unit = job.units[index]
+    track.state = 'preparing'; track.total = job.segments.length
+    const index = nextUnit(job.segments, track.segments.map((unit) => unit.index), job.position)
+    const unit = job.segments[index]
     if (unit) {
       track.message = `Translating ${index + 1}/${track.total}`; publish(job)
       let pcm: Buffer = Buffer.alloc(0); let text = ''; let speed = 1
       const seconds = unit.end - unit.start
       let window = seconds
       if (unit.text.trim()) {
-        const context = JSON.stringify({ before: job.units[index - 1]?.text ?? '', after: job.units[index + 1]?.text ?? '' })
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const guide = durationGuide(seconds, attempt ? { text, seconds: pcm.length / BYTES_PER_SECOND } : undefined)
-          track.message = `${attempt ? 'Refining timing' : 'Translating'} ${index + 1}/${track.total}`; publish(job)
-          text = await translate(unit.text, languages[language], signal, () => {}, `${guide} Neighbouring text is context only, not to be translated: ${context}`)
-          track.message = `Generating voice ${index + 1}/${track.total}`; publish(job)
-          pcm = await decodeSpeech(job.directory, `${language}-${index}`, await synthesize(text, signal), signal)
-          if (!pcm.length) throw new Error('The speech provider returned silent audio. Retry this language.')
-          if (pcm.length / BYTES_PER_SECOND <= seconds * (MAX_TEMPO - 0.03)) break
-        }
+        const context = JSON.stringify({ before: job.segments[index - 1]?.text ?? '', after: job.segments[index + 1]?.text ?? '' })
+        text = await translate(unit.text, languages[language], signal, () => {}, `${durationGuide(seconds)} Neighbouring text is context only, not to be translated: ${context}`)
+        track.message = `Generating voice ${index + 1}/${track.total}`; publish(job)
+        pcm = await decodeSpeech(job.directory, `${language}-${index}`, await synthesize(text, signal), signal)
+        if (!pcm.length) throw new Error('The speech provider returned silent audio. Retry this language.')
         if (pcm.length / BYTES_PER_SECOND > seconds * 3) throw new Error('The provider returned unexpectedly long speech. Retry this language.')
         window = speechWindow(pcm.length / BYTES_PER_SECOND, seconds)
         const fitted = await fitSpeech(job.directory, `${language}-${index}`, pcm, window, signal)
         pcm = fitted.pcm; speed = fitted.speed
       }
-      const audioStart = track.segments.at(-1)?.audioEnd ?? unit.start
-      const audioEnd = audioStart + window
-      job.parts[language].push({ start: audioStart, end: audioEnd, pcm })
-      track.segments.push({ ...unit, text, audioStart, audioEnd, captionEnd: Math.min(unit.end, unit.start + pcm.length / BYTES_PER_SECOND / window * seconds) })
+      // Publish an immutable, playable section immediately, not after the clip.
+      const file = `chunk-${language}-${index}.wav`
+      const padded = assemblePcm([{ start: 0, end: window, pcm }], window)
+      await writeFile(path.join(job.directory, file), wav(padded))
+      const audioEnd = padded.length / BYTES_PER_SECOND
+      track.segments.push({ index, start: unit.start, end: unit.end, text, audioStart: 0, audioEnd, audioUrl: `/api/media/${job.id}/audio/${file}`, captionEnd: Math.min(unit.end, unit.start + pcm.length / BYTES_PER_SECOND / audioEnd * seconds) })
+      track.segments.sort((a, b) => a.index - b.index)
       if (window > seconds + 0.01) track.slowedSections = (track.slowedSections ?? 0) + 1
       track.maxSpeed = Math.max(track.maxSpeed ?? 1, speed)
       track.completed++
     }
     if (track.completed === track.total) {
-      track.message = 'Assembling continuous audio'; publish(job)
-      const last = track.segments.at(-1)
-      track.duration = (last?.audioEnd ?? 0) + Math.max(0, job.duration - (last?.end ?? 0))
-      await writeFile(path.join(job.directory, `track-${language}.wav`), wav(assemblePcm(job.parts[language], track.duration)))
-      job.parts[language] = []
-      track.state = 'ready'; track.message = track.slowedSections ? `Ready · ${track.slowedSections} voice-paced sections` : 'Ready to play'; track.audioUrl = `/api/media/${job.id}/audio/track-${language}.wav`
-    } else if (job.requestedLanguage !== language) { track.state = 'paused'; track.message = 'Saved progress · select to resume' }
+      track.duration = track.segments.reduce((sum, section) => sum + section.audioEnd, 0)
+      track.state = 'ready'; track.message = 'All sections cached'
+    } else if (job.requestedLanguage !== language) { track.state = 'paused'; track.message = 'Cached sections saved · select to continue' }
+    else { track.message = `${track.completed}/${track.total} sections available · preparing ahead` }
     publish(job)
   } catch (error) {
     if (!signal.aborted) { track.state = 'error'; track.error = errorText(error); track.message = 'Preparation failed'; publish(job) }
@@ -145,7 +146,7 @@ async function createJob(name: string, status: Job['status']) {
   const id = randomUUID(); const directory = path.join(root, id)
   await mkdir(directory)
   const job: Job = { id, directory, createdAt: Date.now(), controller: new AbortController(), status, name,
-    duration: 0, width: 0, height: 0, sampleRate: SAMPLE_RATE, language: null, segments: [], tracks: {}, requestedLanguage: 'original', selection: 0, units: [], parts: {}, listeners: new Set() }
+    duration: 0, width: 0, height: 0, sampleRate: SAMPLE_RATE, language: null, segments: [], tracks: {}, requestedLanguage: 'original', selection: 0, position: 0, listeners: new Set() }
   jobs.set(id, job)
   return job
 }
@@ -199,16 +200,18 @@ mediaRouter.get('/:id/video', (request, response) => {
 })
 mediaRouter.post('/:id/tracks', (request, response) => {
   const job = jobs.get(request.params.id)
-  const { language, retry, selection } = request.body ?? {}
+  const { language, retry, selection, position = 0 } = request.body ?? {}
   if (!job) return response.sendStatus(404)
   if (typeof language !== 'string' || (language !== 'original' && !languages[language])) return response.status(400).json({ error: 'Invalid language.' })
   if (!Number.isSafeInteger(selection) || selection < 0) return response.status(400).json({ error: 'Invalid selection revision.' })
+  if (typeof position !== 'number' || !Number.isFinite(position) || position < 0 || position > 600) return response.status(400).json({ error: 'Invalid playback position.' })
   if (selection < job.selection) return response.status(202).json({ state: 'superseded' })
   job.selection = selection
   job.requestedLanguage = language
+  job.position = position
   for (const [key, track] of Object.entries(job.tracks)) if (key !== language && track.state === 'queued') { track.state = 'paused'; track.message = 'Saved progress · select to resume' }
   if (language !== 'original') {
-    if (!job.tracks[language]) { job.tracks[language] = { state: 'queued', completed: 0, total: job.units.length, message: 'Waiting for source captions', segments: [] }; job.parts[language] = [] }
+    if (!job.tracks[language]) job.tracks[language] = { state: 'queued', completed: 0, total: job.segments.length, message: 'Waiting for the first source section', segments: [] }
     const track = job.tracks[language]
     if (track.state === 'paused' || (retry && track.state === 'error')) { track.state = 'queued'; delete track.error; track.message = 'Queued for preparation' }
   }
@@ -216,7 +219,7 @@ mediaRouter.post('/:id/tracks', (request, response) => {
 })
 mediaRouter.get('/:id/audio/:file', (request, response) => {
   const job = jobs.get(request.params.id)
-  if (!job || !/^track-[a-z]{2}\.wav$/.test(request.params.file)) return response.sendStatus(404)
+  if (!job || !/^chunk-[a-z]{2}-\d+\.wav$/.test(request.params.file)) return response.sendStatus(404)
   response.set('Cache-Control', 'private, max-age=3600').sendFile(path.join(job.directory, request.params.file))
 })
 async function removeJob(job: Job) {

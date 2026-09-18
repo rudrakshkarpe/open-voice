@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type Segment = { index: number; start: number; end: number; state: 'pending' | 'ready' | 'error'; text: string; error?: string }
-export type Track = { state: 'queued' | 'preparing' | 'paused' | 'ready' | 'error'; completed: number; total: number; message: string; segments: { start: number; end: number; text: string; audioStart: number; audioEnd: number; captionEnd: number }[]; audioUrl?: string; error?: string; maxSpeed?: number; duration?: number; slowedSections?: number }
+export type Track = { state: 'queued' | 'preparing' | 'paused' | 'ready' | 'error'; completed: number; total: number; message: string; segments: { index: number; start: number; end: number; text: string; audioStart: number; audioEnd: number; captionEnd: number; audioUrl: string }[]; error?: string; maxSpeed?: number; duration?: number; slowedSections?: number }
 export type MediaJob = { id: string; name: string; status: 'importing' | 'extracting' | 'transcribing' | 'ready' | 'error'; error?: string; duration: number;
   width: number; height: number; sampleRate: number; rmsDb?: number; peakDb?: number; language: string | null; segments: Segment[]; tracks: Record<string, Track>; extractedAudioUrl?: string; videoUrl?: string; message?: string }
 

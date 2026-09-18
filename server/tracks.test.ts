@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { assemblePcm, durationGuide, fitSpeech, requiredTempo, speechWindow, translationUnits, trimSilence, wav } from './tracks.js'
+import { assemblePcm, durationGuide, fitSpeech, nextUnit, requiredTempo, speechWindow, trimSilence, wav } from './tracks.js'
 import { BYTES_PER_SECOND } from './audio.js'
 
 test('speech is never slowed to fill a section', () => {
@@ -13,13 +13,19 @@ test('overlong phrases get extra playback time instead of rushed speech', () => 
   assert.equal(speechWindow(18, 10), 15.05)
   assert.ok(requiredTempo(18, speechWindow(18, 10)) < 1.2)
 })
-test('short tails and sentence fragments are grouped without losing source timing', () => {
-  assert.deepEqual(translationUnits([{ start: 0, end: 7, text: 'This sentence continues' }, { start: 7, end: 14, text: 'into the next section.' }, { start: 14, end: 15, text: 'Yes.' }]), [{ start: 0, end: 15, text: 'This sentence continues into the next section. Yes.' }])
+test('translation prioritizes the playhead and upcoming sections, then backfills', () => {
+  const sections = [0, 1, 2, 3].map((index) => ({ start: index * 5, end: (index + 1) * 5, text: 'Speech.', state: 'ready' }))
+  assert.equal(nextUnit(sections, [], 11), 2)
+  assert.equal(nextUnit(sections, [2], 11), 3)
+  assert.equal(nextUnit(sections, [2, 3], 11), 0)
+  assert.equal(nextUnit(sections, [0, 1, 2, 3], 11), -1)
+  assert.equal(nextUnit(sections, [], 5), 1)
 })
-test('grouping preserves silence and bounds TTS context', () => {
-  const sections = [{ start: 0, end: 8, text: 'Hello.' }, { start: 8, end: 15, text: 'More speech.' }, { start: 15, end: 18, text: '' }, { start: 18, end: 25, text: 'Later.' }]
-  assert.deepEqual(translationUnits(sections), [{ start: 0, end: 15, text: 'Hello. More speech.' }, ...sections.slice(2)])
-  assert.equal(translationUnits([{ start: 0, end: 12, text: 'Long thought' }, { start: 12, end: 24, text: 'continued.' }]).length, 2)
+test('the first ready source section is usable before transcription finishes', () => {
+  const sections = [{ start: 0, end: 5, text: 'Ready.', state: 'ready' }, { start: 5, end: 10, text: '', state: 'pending' }]
+  assert.equal(nextUnit(sections, [], 0), 0)
+  assert.equal(nextUnit(sections, [0], 0), -1)
+  assert.equal(nextUnit([{ ...sections[0], state: 'error' }], [], 0), -1)
 })
 test('duration feedback includes the measured speech and a tighter text budget', () => {
   const guide = durationGuide(5, { text: 'A'.repeat(100), seconds: 10 })

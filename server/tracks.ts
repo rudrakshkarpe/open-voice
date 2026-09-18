@@ -6,21 +6,15 @@ import { SAMPLE_RATE, BYTES_PER_SECOND } from './audio.js'
 
 const run = promisify(execFile)
 export type Unit = { start: number; end: number; text: string }
-export type TrackUnit = Unit & { audioStart: number; audioEnd: number; captionEnd: number }
+export type TrackUnit = Unit & { index: number; audioStart: number; audioEnd: number; captionEnd: number; audioUrl: string }
 export type Track = { state: 'queued' | 'preparing' | 'paused' | 'ready' | 'error'; completed: number; total: number; message: string; segments: TrackUnit[]; audioUrl?: string; error?: string; maxSpeed?: number; duration?: number; slowedSections?: number }
 export const MAX_TEMPO = 1.35
 
-export function translationUnits(segments: Unit[]): Unit[] {
-  const units: Unit[] = []
-  for (const segment of segments) {
-    const previous = units.at(-1)
-    // Give TTS a sentence-sized context, not a fresh voice reset every few seconds.
-    // Do not absorb silent sections: their gaps belong on the video timeline.
-    if (previous?.text.trim() && segment.text.trim() && (previous.end - previous.start < 12 || segment.end - segment.start < 6 || !/[.!?。！？]["'”’]?\s*$/.test(previous.text)) && previous.text.length + segment.text.length < 320 && segment.end - previous.start <= 20) {
-      previous.end = segment.end; previous.text = `${previous.text} ${segment.text}`.trim()
-    } else units.push({ start: segment.start, end: segment.end, text: segment.text })
-  }
-  return units
+export function nextUnit(segments: (Unit & { state: string })[], completed: number[], position: number): number {
+  const first = segments.findIndex((segment) => segment.end > position)
+  const start = first < 0 ? Math.max(0, segments.length - 1) : first
+  const order = [...segments.keys()].slice(start).concat([...segments.keys()].slice(0, start))
+  return order.find((index) => segments[index].state === 'ready' && !completed.includes(index)) ?? -1
 }
 
 export function trimSilence(pcm: Buffer): Buffer {

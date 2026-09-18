@@ -1,4 +1,4 @@
-# Continuous video translation
+# Progressive video translation
 
 ```text
 upload OR validated YouTube URL → yt-dlp (YouTube only)
@@ -9,13 +9,13 @@ upload OR validated YouTube URL → yt-dlp (YouTube only)
                      ↓
        Higgs STT → timestamped source transcript → SSE
                      ↓
-       sentence grouping + context-aware translation
+       ready source section + context-aware translation
                      ↓
-        Higgs TTS → measure duration → concise retry
+          Higgs TTS → measure duration → voice pacing
                      ↓
-       bounded FFmpeg atempo → continuous language WAV
+        bounded FFmpeg atempo → publish section WAV → SSE
                      ↓
-       fully decoded Web Audio buffer + video clock
+          decode ahead → Web Audio schedule + video clock
 ```
 
 ## Why not add LiveKit here?
@@ -30,31 +30,33 @@ The caption renderer makes short Unicode-aware cues within each section and sele
 
 ## Preparation and scheduling
 
-`server/tracks.ts` groups adjacent speech into bounded contexts (up to 20 seconds / roughly 320 source characters), retaining silent intervals. Translation gets neighboring text as context, never as extra text to speak. Each unit is synthesized and measured. If too long, one additional translation attempt uses the measured duration and previous text to request a more concise version.
+Source sections have stable indices and 4–9-second quiet-boundary timing. As each transcription arrives, it becomes eligible for translation immediately; neither the complete transcript nor complete translated track is a prerequisite. Translation gets available neighboring text as context, never as extra text to speak. Each unit is synthesized once and measured. The prior extra translate/synthesize pass has been removed from this latency-sensitive path; overlong speech uses voice pacing instead.
 
-FFmpeg `atempo` preserves pitch and is capped at 1.35×. Output is measured again, not blindly truncated to the deadline. If speech still needs more time, its audio window is extended with a 1.2× tempo target and that video section plays more slowly. Each unit stores source and audio start/end coordinates plus the caption end. Short speech is not artificially slowed; silence fills the remaining window. Abnormally long speech (over three times the source section) fails with a retry. This is not lip-sync, and the model can still mistranslate or produce imperfect prosody.
+FFmpeg `atempo` preserves pitch and is capped at 1.35×. Output is measured again, not blindly truncated to the deadline. If speech needs more time, its audio window is extended with a 1.2× tempo target and that video section plays more slowly. Each unit stores its index, source start/end, local audio start/end, caption end and its own WAV URL. Short speech is not artificially slowed; silence fills the remaining window. Abnormally long speech (over three times the source section) fails with a retry. This is not lip-sync, and the model can still mistranslate or produce imperfect prosody.
 
-A global preparation queue runs one translation/TTS unit at a time. Each unit boundary re-evaluates the job's latest requested language. Monotonically increasing selection revisions prevent a delayed HTTP request from overriding a newer choice. Old-language completed units are retained; retries resume at the failed unit. Selecting Original stops scheduling further translation after the in-flight unit. Source STT is separately bounded by the two-upload concurrency limit.
+A global preparation queue runs one translation/TTS unit at a time. Each unit boundary re-evaluates the latest requested language and playhead position. It prioritizes that source section, then upcoming sections, then backfills earlier missing sections. The client updates priority on language changes, seeks and periodically during playback. Monotonically increasing selection revisions prevent delayed requests from overriding newer choices. Old-language completed sections are retained; selecting Original stops further translation after the in-flight unit. Source STT is separately bounded by the two-upload concurrency limit. Pending transcripts do not trigger a busy loop: their completion reschedules the job.
 
-When all units are ready, a single PCM WAV is assembled at the mapped audio offsets and exposed as a ready track. Its duration may exceed the source duration. SSE reports stage, completed/total units, and the count of voice-paced sections. Preparation is intentionally whole-track: no claim of first-byte audio streaming.
+Each PCM section is padded, written completely, then published as an immutable WAV URL through SSE. It can be fetched and played while the track remains `preparing`. `ready` now means all sections have been cached, not permission to start playback. Out-of-order sections are sorted by their stable source index, so generating near a late playhead does not require synthesizing earlier speech. Source transcription failures preserve available sections and surface an error for missing speech.
 
 ## Playback
 
-`useDubPlayer` downloads and decodes a whole ready track before selecting it. It caches at most three decoded tracks; the server retains completed WAVs for the media session. One `AudioBufferSourceNode` runs across the entire timeline instead of stopping/reloading at each section. Audio stays at 1×. Video speed is the unit's source-duration/audio-duration ratio, plus at most ±2% clock correction when mapped drift exceeds 60 ms. Piecewise-linear time mapping is continuous across unit boundaries and reversible for seeking and language changes.
+`useDubPlayer` fetches nearby sections for the requested and active languages, with four concurrent downloads at most. It keeps up to 48 decoded sections cached; the server retains all generated section WAVs for the session. A language becomes active when decoded audio covers the current position with at least two seconds of contiguous audio, or the remaining final section. A later section cannot bridge a missing earlier one. No check against whole-track `ready` gates playback.
 
-Current audio keeps playing while a new language prepares or downloads. Ready switches prefer a target section boundary within 1.5 source seconds, otherwise switch at the current source timeline position mapped into the target audio. Short gain ramps avoid digital clicks, but an explicit mid-sentence language change can still interrupt a word. Captions switch with the active audio. Pause, seek, waiting and source replacement stop the audio node; resumption maps the video position into the active track. Epoch checks invalidate pending video-play operations.
+`AudioQueue` schedules decoded sections back-to-back at exact `AudioContext` times, before the previous node ends. The UI timer does not trigger sentence playback and no media element reload is required at boundaries. The queue looks ahead up to roughly 20 seconds. Audio runs at 1×; video speed follows each section's source/audio duration ratio, with at most ±2% drift correction. Each section uses local audio coordinates, so seeks and switches work even if preceding sections have not been generated.
 
-“Recent switches” exposes language transitions. “Playback diagnostics” exposes audio instance count and measured clock drift, useful for verifying that ordinary sentence boundaries do not create new audio starts. A new instance on pause/resume, seek or language change is expected.
+Current audio keeps playing while a new language prepares at the current position. Switching uses short gain ramps; an explicit mid-sentence switch can interrupt a word. If an active queue runs dry, video and audio stop together at that source boundary, show a buffering message and automatically resume after the short cushion returns. Audio is never silently skipped to a later available section. Pause, seek, video waiting, replacement and language changes cancel scheduled nodes. Epoch checks invalidate stale asynchronous play operations.
+
+“Recent switches” exposes language transitions. “Playback diagnostics” exposes buffered seconds, stream starts (not the number of scheduled section nodes), rebuffer events and clock drift. A new stream on pause/resume, seek or language change is expected.
 
 ## API and operational limits
 
 - `POST /api/media`: multipart `file`.
 - `POST /api/media/youtube`: JSON `{url}`. Canonicalizes recognized YouTube video URLs. Downloader runs without shell interpretation, user config, plugins, cookies or remote runtime components.
 - `GET /api/media/:id` and `GET /api/media/:id/events`: job snapshot / SSE.
-- `POST /api/media/:id/tracks`: JSON `{language, selection, retry?}`. `original` is a valid selection and does not synthesize.
+- `POST /api/media/:id/tracks`: JSON `{language, selection, position, retry?}`. `original` is a valid selection and does not synthesize. Position is a bounded source-video time; stale revisions are ignored.
 - `GET /api/media/:id/video`: imported MP4 with range support.
 - `GET /api/media/:id/source.wav`: extracted transcription input.
-- `GET /api/media/:id/audio/track-<language>.wav`: completed continuous translation.
+- `GET /api/media/:id/audio/chunk-<language>-<index>.wav`: a completed section, available while later sections are still generating.
 - `DELETE /api/media/:id`: abort and remove temporary job files.
 
 Limits are 200 MB, 10 minutes, two concurrent imports/transcriptions, bounded subprocess/provider timeouts, and one-hour expiry for disconnected jobs. YouTube imports select H.264/AAC MP4 up to 720p and reject live/upcoming or access-restricted metadata. YouTube may still block downloading a public video; the app reports that and offers the upload path rather than bypassing access restrictions.
@@ -63,11 +65,11 @@ Jobs are in memory and vanish on server restart. Refresh and re-upload/re-import
 
 ## Verification
 
-`npm test` covers signal checks, segmentation, language evidence, progressive captions, timing/grouping, PCM assembly, unsafe duration rejection, YouTube URL validation and bounded switch/clock correction. `npm run lint` and `npm run build` check both TypeScript applications. Live provider and browser checks are necessary as well: API credentials, YouTube availability, provider timing and perceived speech quality cannot be guaranteed by unit tests.
+`npm test` covers signal checks, segmentation, language evidence, progressive captions, playhead prioritization, partial transcription readiness, PCM assembly, duration handling and YouTube validation. Fake-audio-clock tests verify exact back-to-back scheduling, mapped seeks, future-node cancellation, buffer holes and underflow. `npm run lint` and `npm run build` check both TypeScript applications. Live provider and browser checks remain necessary: credentials, YouTube availability, provider latency and perceived speech quality cannot be guaranteed by unit tests.
 
-Live checks on 2026-09-18 used the supplied sample and a 20-second excerpt:
+Progressive-playback checks on 2026-09-18 used the supplied 73-second sample:
 
-- Both full `youtube.com/watch` and short `youtu.be` inputs imported the 360×640 video, detected English and produced all 11 source sections. Imported video supports byte-range seeking.
-- Italian and Mandarin Chinese generated playable continuous tracks. The full 73.909-second source produced a 76.759-second Italian track with six translation units; one unit paced the video at about 0.82×. Maximum offline speech tempo was about 1.31×.
-- Browser checks covered continuous playback across sections, progressive captions, Original/Italian/Chinese selection, keeping current audio during preparation, pause, rewind and cache reuse. A stale selection revision was rejected by the API. Progress reconnected correctly after frontend hot reload.
-- All 23 automated tests, lint and production build passed. These are integration/timing checks, not native-speaker translation or perceived-voice-quality evaluations. Other videos, devices and provider responses still need broader testing.
+- The API exposed a playable Italian WAV at 1/11 sections while its track was still preparing. The browser played Italian at 2/11 sections.
+- Choosing uncached Chinese kept Italian playing; Chinese then became active while its cache was still incomplete (observed at 7/11). Playback reached the end with zero reported audio rebuffer events in that run.
+- Section duration headers, invalid playhead rejection and stale selection handling were checked against the running API. Existing YouTube importing and byte-range playback paths are unchanged.
+- These are integration/timing checks, not native-speaker quality evaluations. Progressive delivery is not sample-level model streaming: each short phrase still completes translation and synthesis before publication. Slow provider responses, concurrent jobs or network delays can still cause a short initial wait or later buffering.
